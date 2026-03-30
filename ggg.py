@@ -115,6 +115,12 @@ def maybe_finalize_bmi(current_chat_history):
     return tracker.get_next_field()
 
 
+def build_runtime_error_message(exc):
+    if "DASHSCOPE_API_KEY" in str(exc):
+        return "系统已启动，但尚未配置 DASHSCOPE_API_KEY，暂时无法调用大模型。请先在 Hugging Face Space Secrets 中添加该密钥。"
+    return f"系统运行时出现错误: {exc}"
+
+
 def init_system():
     """初始化系统, 恢复到初始数据"""
     global tracker, metadata
@@ -130,7 +136,12 @@ def init_system():
 
     field = tracker.get_next_field()
     history_text = tracker.get_dialogue_history()
-    question = generate_question(field, metadata, history_text)
+    try:
+        question = generate_question(field, metadata, history_text)
+    except Exception as exc:
+        add_assistant_message(build_runtime_error_message(exc), chat_history)
+        return "初始化系统失败", chat_history, field, file_path, pd.DataFrame()
+
     add_assistant_message(question, chat_history)
     return "初始化系统成功", chat_history, field, file_path, pd.DataFrame()
 
@@ -146,7 +157,13 @@ def process_user_input(user_message, chat_history):
     history_text = tracker.get_dialogue_history()
 
     start_parse = time.time()
-    raw_result = parse_answer(field, user_message, metadata[field]["描述"], history_text)
+    try:
+        raw_result = parse_answer(field, user_message, metadata[field]["描述"], history_text)
+    except Exception as exc:
+        error_message = build_runtime_error_message(exc)
+        add_assistant_message(error_message, chat_history)
+        df, file_path = export_tracker_data()
+        return "", chat_history, field, error_message, file_path, df
     # 先把模型输出归一化，再用字段规则做一次“填表口径”校正。
     result = normalize_parse_result(raw_result)
     result = apply_field_completion_rules(field, result)
@@ -198,7 +215,12 @@ def process_user_input(user_message, chat_history):
 
     history_text = tracker.get_dialogue_history()
     start_question = time.time()
-    question = generate_question(field, metadata, history_text, status_for_question or "first_ask")
+    try:
+        question = generate_question(field, metadata, history_text, status_for_question or "first_ask")
+    except Exception as exc:
+        error_message = build_runtime_error_message(exc)
+        add_assistant_message(error_message, chat_history)
+        return "", chat_history, field, error_message, file_path, df
     end_question = time.time()
     print(f"🔍 生成问题 generate_question() 耗时：{end_question - start_question:.2f} 秒")
     add_assistant_message(question, chat_history)
