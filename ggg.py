@@ -26,6 +26,9 @@ tracker = FieldStateTracker(metadata)
 field_attempts = {}
 chat_history = []   # 专门给 gradio 的 Chatbot 用的
 
+ALLOWED_REPORT_SUFFIXES = {".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg"}
+ALLOWED_REPORT_FILE_TYPES = [".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg"]
+
 CUSTOM_CSS = """
 .gradio-container {
     background:
@@ -148,6 +151,17 @@ COLUMN_NAMES = {
 }
 
 
+def build_progress_text():
+    total_fields = len(metadata)
+    completed_fields = len(tracker.filled_data)
+    if total_fields == 0:
+        return "0/0 (0%)"
+
+    progress_ratio = completed_fields / total_fields
+    progress_percent = round(progress_ratio * 100)
+    return f"{completed_fields}/{total_fields} ({progress_percent}%)"
+
+
 def export_tracker_data():
     df = pd.DataFrame(tracker.get_parse_history())
     df = df.rename(columns=COLUMN_NAMES)
@@ -242,8 +256,10 @@ def save_uploaded_report(uploaded_file):
         return "未上传化验单。", ""
 
     uploaded_path = Path(uploaded_file)
-    if uploaded_path.suffix.lower() != ".docx":
-        return "仅支持上传 .docx 格式的化验单。", ""
+    suffix = uploaded_path.suffix.lower()
+    if suffix not in ALLOWED_REPORT_SUFFIXES:
+        allowed_text = "、".join(sorted(ALLOWED_REPORT_SUFFIXES))
+        return f"仅支持以下格式的化验单: {allowed_text}", ""
 
     upload_dir = BASE_DIR / "uploaded_reports"
     upload_dir.mkdir(exist_ok=True)
@@ -254,7 +270,15 @@ def save_uploaded_report(uploaded_file):
     return f"化验单已上传: {target_path.name}", str(target_path)
 
 
-def stream_assistant_messages(base_history, new_messages, current_field, parse_text, file_path, df):
+def stream_assistant_messages(
+    base_history,
+    new_messages,
+    current_field,
+    progress_text,
+    parse_text,
+    file_path,
+    df,
+):
     display_history = clone_chat_history(base_history)
     for message in new_messages:
         role = message.get("role")
@@ -268,10 +292,28 @@ def stream_assistant_messages(base_history, new_messages, current_field, parse_t
         chunk_size = 12 if len(full_text) > 120 else 6
         for index in range(chunk_size, len(full_text) + chunk_size, chunk_size):
             assistant_message["content"] = full_text[:index]
-            yield "", clone_chat_history(display_history), current_field, parse_text, file_path, df
+            yield (
+                gr.update(value="", interactive=False),
+                clone_chat_history(display_history),
+                current_field,
+                progress_text,
+                parse_text,
+                file_path,
+                df,
+                gr.update(interactive=False),
+            )
         assistant_message["content"] = full_text
 
-    yield "", clone_chat_history(display_history), current_field, parse_text, file_path, df
+    yield (
+        gr.update(value="", interactive=True),
+        clone_chat_history(display_history),
+        current_field,
+        progress_text,
+        parse_text,
+        file_path,
+        df,
+        gr.update(interactive=True),
+    )
 
 
 def init_system():
@@ -293,10 +335,10 @@ def init_system():
         question = generate_question(field, metadata, history_text)
     except Exception as exc:
         add_assistant_message(build_runtime_error_message(exc), chat_history)
-        return "初始化系统失败", chat_history, field, file_path, pd.DataFrame()
+        return "初始化系统失败", chat_history, field, build_progress_text(), file_path, pd.DataFrame()
 
     add_assistant_message(question, chat_history)
-    return "初始化系统成功", chat_history, field, file_path, pd.DataFrame()
+    return "初始化系统成功", chat_history, field, build_progress_text(), file_path, pd.DataFrame()
 
 
 def process_user_input(user_message, chat_history):
@@ -316,7 +358,7 @@ def process_user_input(user_message, chat_history):
         error_message = build_runtime_error_message(exc)
         add_assistant_message(error_message, chat_history)
         df, file_path = export_tracker_data()
-        return "", chat_history, field, error_message, file_path, df
+        return "", chat_history, field, build_progress_text(), error_message, file_path, df
     # 先把模型输出归一化，再用字段规则做一次“填表口径”校正。
     result = normalize_parse_result(raw_result)
     result = apply_field_completion_rules(field, result)
@@ -364,7 +406,7 @@ def process_user_input(user_message, chat_history):
     if field is None:
         completion_msg = "所有信息已收集完成，请您点击左上角“导出并下载”按钮进行下载！"
         add_assistant_message(completion_msg, chat_history)
-        return "", chat_history, field, parse_output, file_path, df
+        return "", chat_history, field, build_progress_text(), parse_output, file_path, df
 
     history_text = tracker.get_dialogue_history()
     start_question = time.time()
@@ -373,12 +415,12 @@ def process_user_input(user_message, chat_history):
     except Exception as exc:
         error_message = build_runtime_error_message(exc)
         add_assistant_message(error_message, chat_history)
-        return "", chat_history, field, error_message, file_path, df
+        return "", chat_history, field, build_progress_text(), error_message, file_path, df
     end_question = time.time()
     print(f"🔍 生成问题 generate_question() 耗时：{end_question - start_question:.2f} 秒")
     add_assistant_message(question, chat_history)
 
-    return "", chat_history, field, parse_output, file_path, df
+    return "", chat_history, field, build_progress_text(), parse_output, file_path, df
 
 
 
@@ -398,7 +440,7 @@ def on_edit(edited_df):
     return gr.update(value="Saved" ), str(excel_file)
 
 
-with gr.Blocks(title="AI医疗随访系统", css=CUSTOM_CSS) as demo:
+with gr.Blocks(title="AI医疗随访系统") as demo:
     with gr.Column(elem_classes=["app-shell"]):
         gr.HTML(
             """
@@ -419,8 +461,8 @@ with gr.Blocks(title="AI医疗随访系统", css=CUSTOM_CSS) as demo:
                 gr.Markdown("### 工具面板", elem_classes=["section-title"])
                 with gr.Group(elem_classes=["upload-card"]):
                     report_upload = gr.File(
-                        label="上传化验单（.docx）",
-                        file_types=[".docx"],
+                        label="上传化验单（.doc/.docx/.pdf/.png/.jpg）",
+                        file_types=ALLOWED_REPORT_FILE_TYPES,
                         type="filepath",
                     )
                     report_status = gr.Textbox(label="上传状态", interactive=False, elem_classes=["compact-box"])
@@ -431,9 +473,10 @@ with gr.Blocks(title="AI医疗随访系统", css=CUSTOM_CSS) as demo:
                 status_output = gr.Textbox(label="系统状态", interactive=False, elem_classes=["compact-box"])
                 parse_output = gr.Textbox(label="上一问题解析情况", lines=3, interactive=False, elem_classes=["compact-box"])
                 question_output = gr.Textbox(label="当前字段", interactive=False, elem_classes=["compact-box"])
+                progress_output = gr.Textbox(label="当前进度", interactive=False, elem_classes=["compact-box"])
             with gr.Column(scale=3, elem_classes=["chat-card"]):
                 gr.Markdown("### 随访对话", elem_classes=["section-title"])
-                chatbot = gr.Chatbot(label="对话记录", height=520, layout="bubble", type="messages")
+                chatbot = gr.Chatbot(label="对话记录", height=520, layout="bubble")
                 msg = gr.Textbox(
                     label="请输入您的回答",
                     placeholder="在这里输入您的回答...",
@@ -446,41 +489,69 @@ with gr.Blocks(title="AI医疗随访系统", css=CUSTOM_CSS) as demo:
             gr.Markdown("### 随访数据表", elem_classes=["section-title"])
             dataframe_output = gr.Dataframe(label="文件内容", interactive=True)
 
-    init_btn.click(fn=init_system, outputs=[status_output, chatbot, question_output, download_btn, dataframe_output])
-    demo.load(fn=init_system, outputs=[status_output, chatbot, question_output, download_btn, dataframe_output])
+    init_btn.click(fn=init_system, outputs=[status_output, chatbot, question_output, progress_output, download_btn, dataframe_output])
+    demo.load(fn=init_system, outputs=[status_output, chatbot, question_output, progress_output, download_btn, dataframe_output])
     download_btn.click(fn=download_data, outputs=download_btn)
     dataframe_output.edit(fn=on_edit, inputs=dataframe_output, outputs=[status_output, download_btn])
     report_upload.upload(fn=save_uploaded_report, inputs=report_upload, outputs=[report_status, report_saved_path])
 
     def respond(message, chat_history):
         if not message or not message.strip():
-            yield "", clone_chat_history(chat_history), gr.update(), "请输入内容后再发送。", gr.update(), gr.update()
+            yield (
+                gr.update(value="", interactive=True),
+                clone_chat_history(chat_history),
+                gr.update(),
+                gr.update(),
+                "请输入内容后再发送。",
+                gr.update(),
+                gr.update(),
+                gr.update(interactive=True),
+            )
             return
 
         base_history = clone_chat_history(chat_history)
         pending_history = clone_chat_history(base_history)
         pending_history.append({"role": "user", "content": message})
-        yield "", pending_history, gr.update(), "正在解析并生成回复，请稍候...", gr.update(), gr.update()
+        yield (
+            gr.update(value="", interactive=False),
+            pending_history,
+            gr.update(),
+            gr.update(),
+            "正在解析并生成回复，请稍候...",
+            gr.update(),
+            gr.update(),
+            gr.update(interactive=False),
+        )
 
-        _, updated_chat_history, current_field, parse_text, file_path, df = process_user_input(message, base_history)
+        _, updated_chat_history, current_field, progress_text, parse_text, file_path, df = process_user_input(message, base_history)
         new_messages = updated_chat_history[len(chat_history or []):]
         assistant_messages = [item for item in new_messages if item.get("role") == "assistant"]
 
         if not assistant_messages:
-            yield "", updated_chat_history, current_field, parse_text, file_path, df
+            yield (
+                gr.update(value="", interactive=True),
+                updated_chat_history,
+                current_field,
+                progress_text,
+                parse_text,
+                file_path,
+                df,
+                gr.update(interactive=True),
+            )
             return
 
         yield from stream_assistant_messages(
             pending_history,
             assistant_messages,
             current_field,
+            progress_text,
             parse_text,
             file_path,
             df,
         )
 
-    msg.submit(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, parse_output, download_btn, dataframe_output])
-    submit_btn.click(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, parse_output, download_btn, dataframe_output])
+    msg.submit(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, progress_output, parse_output, download_btn, dataframe_output, submit_btn])
+    submit_btn.click(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, progress_output, parse_output, download_btn, dataframe_output, submit_btn])
 
 
 # 保留原有的 main_flow 函数，但不再直接调用
@@ -490,4 +561,4 @@ def main_flow(excel_path):
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(css=CUSTOM_CSS)
