@@ -2,6 +2,7 @@
 import gradio as gr
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -24,6 +25,117 @@ metadata = load_excel_template(excel_path)
 tracker = FieldStateTracker(metadata)
 field_attempts = {}
 chat_history = []   # 专门给 gradio 的 Chatbot 用的
+
+CUSTOM_CSS = """
+.gradio-container {
+    background:
+        radial-gradient(circle at top left, rgba(92, 180, 255, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(35, 130, 255, 0.12), transparent 30%),
+        linear-gradient(180deg, #f4f8ff 0%, #eef4fb 100%);
+}
+
+.app-shell {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 18px 0 10px;
+}
+
+.hero-card,
+.sidebar-card,
+.chat-card,
+.data-card {
+    border: 1px solid rgba(117, 142, 168, 0.18);
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 18px 45px rgba(44, 77, 117, 0.10);
+    backdrop-filter: blur(12px);
+}
+
+.hero-card {
+    padding: 24px 28px 10px;
+    margin-bottom: 14px;
+    overflow: hidden;
+}
+
+.hero-card h1 {
+    margin: 0;
+    font-size: 2.1rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: #15304f;
+}
+
+.hero-card p {
+    margin: 10px 0 12px;
+    color: #4f647a;
+    font-size: 1rem;
+}
+
+.hero-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.hero-badges span {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: #e9f3ff;
+    color: #184a7c;
+    font-size: 0.92rem;
+    font-weight: 600;
+}
+
+.sidebar-card,
+.chat-card,
+.data-card {
+    padding: 10px;
+}
+
+.section-title {
+    margin: 4px 0 12px;
+    padding: 2px 6px;
+    color: #193b5e;
+    font-size: 1.02rem;
+    font-weight: 700;
+}
+
+.compact-box textarea,
+.compact-box input {
+    border-radius: 16px !important;
+}
+
+.chat-card .bubble-wrap,
+.chat-card .message-wrap {
+    font-size: 0.98rem;
+}
+
+.chat-actions {
+    margin-top: 8px;
+}
+
+.primary-action button {
+    background: linear-gradient(135deg, #1b7bff 0%, #1662d6 100%) !important;
+    border: none !important;
+    color: white !important;
+    box-shadow: 0 14px 28px rgba(27, 123, 255, 0.28);
+}
+
+.soft-action button {
+    background: #eef6ff !important;
+    color: #184a7c !important;
+    border: 1px solid #cfe3fb !important;
+}
+
+.upload-card {
+    margin-bottom: 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px dashed rgba(117, 142, 168, 0.28);
+}
+"""
 
 
 COLUMN_NAMES = {
@@ -119,6 +231,47 @@ def build_runtime_error_message(exc):
     if "DASHSCOPE_API_KEY" in str(exc):
         return "系统已启动，但尚未配置 DASHSCOPE_API_KEY，暂时无法调用大模型。请先在 Hugging Face Space Secrets 中添加该密钥。"
     return f"系统运行时出现错误: {exc}"
+
+
+def clone_chat_history(history):
+    return [dict(item) if isinstance(item, dict) else item for item in (history or [])]
+
+
+def save_uploaded_report(uploaded_file):
+    if not uploaded_file:
+        return "未上传化验单。", ""
+
+    uploaded_path = Path(uploaded_file)
+    if uploaded_path.suffix.lower() != ".docx":
+        return "仅支持上传 .docx 格式的化验单。", ""
+
+    upload_dir = BASE_DIR / "uploaded_reports"
+    upload_dir.mkdir(exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    target_path = upload_dir / f"{timestamp}_{uploaded_path.name}"
+    shutil.copy2(uploaded_path, target_path)
+    return f"化验单已上传: {target_path.name}", str(target_path)
+
+
+def stream_assistant_messages(base_history, new_messages, current_field, parse_text, file_path, df):
+    display_history = clone_chat_history(base_history)
+    for message in new_messages:
+        role = message.get("role")
+        if role != "assistant":
+            display_history.append(dict(message))
+            continue
+
+        assistant_message = {"role": "assistant", "content": ""}
+        display_history.append(assistant_message)
+        full_text = message.get("content", "")
+        chunk_size = 12 if len(full_text) > 120 else 6
+        for index in range(chunk_size, len(full_text) + chunk_size, chunk_size):
+            assistant_message["content"] = full_text[:index]
+            yield "", clone_chat_history(display_history), current_field, parse_text, file_path, df
+        assistant_message["content"] = full_text
+
+    yield "", clone_chat_history(display_history), current_field, parse_text, file_path, df
 
 
 def init_system():
@@ -245,35 +398,86 @@ def on_edit(edited_df):
     return gr.update(value="Saved" ), str(excel_file)
 
 
-with gr.Blocks(title="AI医疗随访系统") as demo:
-    gr.Markdown("# AI医疗随访对话系统")
-    gr.Markdown("AI对话系统")
+with gr.Blocks(title="AI医疗随访系统", css=CUSTOM_CSS) as demo:
+    with gr.Column(elem_classes=["app-shell"]):
+        gr.HTML(
+            """
+            <div class="hero-card">
+                <div class="hero-badges">
+                    <span>医疗随访助手</span>
+                    <span>结构化信息采集</span>
+                    <span>支持化验单上传</span>
+                </div>
+                <h1>AI 医疗随访对话系统</h1>
+                <p>保留现有随访流程与导出能力，在同一页面里完成对话采集、结果校对与化验单整理。</p>
+            </div>
+            """
+        )
 
-    with gr.Row():
-        with gr.Column(scale=1):
-            init_btn = gr.Button("初始化系统", variant="primary")
-            download_btn = gr.DownloadButton(label="导出并下载", value=download_data, visible=True)
-            status_output = gr.Textbox(label="系统状态")
-            parse_output = gr.Textbox(label="上一问题解析情况", lines=3)
-            question_output = gr.Textbox(label="当前字段")
-        with gr.Column(scale=3):
-            chatbot = gr.Chatbot(label="对话记录", height=500, layout="bubble")
-            msg = gr.Textbox(
-                label="请输入您的回答",
-                placeholder="在这里输入您的回答...",
-                lines=1
-            )
-            submit_btn = gr.Button("发送", variant="primary")
-    dataframe_output = gr.Dataframe(label="文件内容", interactive=True)
+        with gr.Row():
+            with gr.Column(scale=1, elem_classes=["sidebar-card"]):
+                gr.Markdown("### 工具面板", elem_classes=["section-title"])
+                with gr.Group(elem_classes=["upload-card"]):
+                    report_upload = gr.File(
+                        label="上传化验单（.docx）",
+                        file_types=[".docx"],
+                        type="filepath",
+                    )
+                    report_status = gr.Textbox(label="上传状态", interactive=False, elem_classes=["compact-box"])
+                    report_saved_path = gr.Textbox(label="文件保存位置", interactive=False, elem_classes=["compact-box"])
+
+                init_btn = gr.Button("初始化系统", variant="primary", elem_classes=["primary-action"])
+                download_btn = gr.DownloadButton(label="导出并下载", value=download_data, visible=True, elem_classes=["soft-action"])
+                status_output = gr.Textbox(label="系统状态", interactive=False, elem_classes=["compact-box"])
+                parse_output = gr.Textbox(label="上一问题解析情况", lines=3, interactive=False, elem_classes=["compact-box"])
+                question_output = gr.Textbox(label="当前字段", interactive=False, elem_classes=["compact-box"])
+            with gr.Column(scale=3, elem_classes=["chat-card"]):
+                gr.Markdown("### 随访对话", elem_classes=["section-title"])
+                chatbot = gr.Chatbot(label="对话记录", height=520, layout="bubble", type="messages")
+                msg = gr.Textbox(
+                    label="请输入您的回答",
+                    placeholder="在这里输入您的回答...",
+                    lines=1,
+                    elem_classes=["compact-box"]
+                )
+                submit_btn = gr.Button("发送", variant="primary", elem_classes=["primary-action", "chat-actions"])
+
+        with gr.Column(elem_classes=["data-card"]):
+            gr.Markdown("### 随访数据表", elem_classes=["section-title"])
+            dataframe_output = gr.Dataframe(label="文件内容", interactive=True)
 
     init_btn.click(fn=init_system, outputs=[status_output, chatbot, question_output, download_btn, dataframe_output])
     demo.load(fn=init_system, outputs=[status_output, chatbot, question_output, download_btn, dataframe_output])
     download_btn.click(fn=download_data, outputs=download_btn)
     dataframe_output.edit(fn=on_edit, inputs=dataframe_output, outputs=[status_output, download_btn])
+    report_upload.upload(fn=save_uploaded_report, inputs=report_upload, outputs=[report_status, report_saved_path])
 
     def respond(message, chat_history):
-        _, updated_chat_history, current_field, parse_text, file_path, df = process_user_input(message, chat_history)
-        return "", updated_chat_history, current_field, parse_text, file_path, df
+        if not message or not message.strip():
+            yield "", clone_chat_history(chat_history), gr.update(), "请输入内容后再发送。", gr.update(), gr.update()
+            return
+
+        base_history = clone_chat_history(chat_history)
+        pending_history = clone_chat_history(base_history)
+        pending_history.append({"role": "user", "content": message})
+        yield "", pending_history, gr.update(), "正在解析并生成回复，请稍候...", gr.update(), gr.update()
+
+        _, updated_chat_history, current_field, parse_text, file_path, df = process_user_input(message, base_history)
+        new_messages = updated_chat_history[len(chat_history or []):]
+        assistant_messages = [item for item in new_messages if item.get("role") == "assistant"]
+
+        if not assistant_messages:
+            yield "", updated_chat_history, current_field, parse_text, file_path, df
+            return
+
+        yield from stream_assistant_messages(
+            pending_history,
+            assistant_messages,
+            current_field,
+            parse_text,
+            file_path,
+            df,
+        )
 
     msg.submit(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, parse_output, download_btn, dataframe_output])
     submit_btn.click(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, parse_output, download_btn, dataframe_output])
