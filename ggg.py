@@ -1,5 +1,6 @@
 ﻿from Model_initialization import *
 import gradio as gr
+import html
 import os
 import re
 import shutil
@@ -28,50 +29,84 @@ chat_history = []   # 专门给 gradio 的 Chatbot 用的
 
 ALLOWED_REPORT_SUFFIXES = {".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg"}
 ALLOWED_REPORT_FILE_TYPES = [".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg"]
+UPLOAD_TRIGGER_KEYWORDS = ("化验", "检查", "血生化", "肌酐", "尿常规", "肾脏", "报告")
+UPLOAD_REVEAL_REMAINING_FIELDS = 6
+UPLOAD_REVEAL_PROGRESS = 0.72
 
 CUSTOM_CSS = """
+:root {
+    --brand-ink: #15304f;
+    --brand-subtle: #5a7189;
+    --brand-line: rgba(117, 142, 168, 0.18);
+    --brand-soft: #eef6ff;
+    --brand-accent: #1b7bff;
+    --brand-accent-dark: #1662d6;
+    --surface: rgba(255, 255, 255, 0.92);
+}
+
 .gradio-container {
     background:
-        radial-gradient(circle at top left, rgba(92, 180, 255, 0.18), transparent 28%),
-        radial-gradient(circle at top right, rgba(35, 130, 255, 0.12), transparent 30%),
-        linear-gradient(180deg, #f4f8ff 0%, #eef4fb 100%);
+        radial-gradient(circle at top left, rgba(92, 180, 255, 0.22), transparent 26%),
+        radial-gradient(circle at top right, rgba(35, 130, 255, 0.14), transparent 32%),
+        linear-gradient(180deg, #f6f9ff 0%, #eef4fb 52%, #edf3f8 100%);
 }
 
 .app-shell {
-    max-width: 1320px;
+    max-width: 1380px;
     margin: 0 auto;
-    padding: 18px 0 10px;
+    padding: 10px 0 14px;
 }
 
 .hero-card,
 .sidebar-card,
 .chat-card,
 .data-card {
-    border: 1px solid rgba(117, 142, 168, 0.18);
+    border: 1px solid var(--brand-line);
     border-radius: 22px;
-    background: rgba(255, 255, 255, 0.92);
-    box-shadow: 0 18px 45px rgba(44, 77, 117, 0.10);
+    background: var(--surface);
+    box-shadow: 0 18px 45px rgba(44, 77, 117, 0.09);
     backdrop-filter: blur(12px);
 }
 
 .hero-card {
-    padding: 24px 28px 10px;
-    margin-bottom: 14px;
+    padding: 24px 28px 18px;
+    margin-bottom: 16px;
     overflow: hidden;
+    position: relative;
+}
+
+.hero-card::after {
+    content: "";
+    position: absolute;
+    right: -80px;
+    top: -80px;
+    width: 220px;
+    height: 220px;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(27, 123, 255, 0.14) 0%, rgba(27, 123, 255, 0) 70%);
+    pointer-events: none;
+}
+
+.hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 2.2fr) minmax(260px, 1fr);
+    gap: 18px;
+    align-items: stretch;
 }
 
 .hero-card h1 {
     margin: 0;
-    font-size: 2.1rem;
+    font-size: 2.2rem;
     font-weight: 800;
     letter-spacing: -0.03em;
-    color: #15304f;
+    color: var(--brand-ink);
 }
 
 .hero-card p {
     margin: 10px 0 12px;
-    color: #4f647a;
-    font-size: 1rem;
+    color: var(--brand-subtle);
+    font-size: 1.02rem;
+    line-height: 1.65;
 }
 
 .hero-badges {
@@ -92,17 +127,92 @@ CUSTOM_CSS = """
     font-weight: 600;
 }
 
+.hero-stats {
+    display: grid;
+    gap: 12px;
+}
+
+.hero-stat {
+    border-radius: 18px;
+    padding: 14px 16px;
+    background: linear-gradient(180deg, rgba(239, 247, 255, 0.95) 0%, rgba(230, 241, 252, 0.9) 100%);
+    border: 1px solid rgba(169, 198, 230, 0.45);
+}
+
+.hero-stat strong {
+    display: block;
+    color: var(--brand-ink);
+    font-size: 0.98rem;
+    margin-bottom: 4px;
+}
+
+.hero-stat span {
+    color: var(--brand-subtle);
+    font-size: 0.92rem;
+    line-height: 1.5;
+}
+
 .sidebar-card,
 .chat-card,
 .data-card {
-    padding: 10px;
+    padding: 12px;
+}
+
+.sidebar-card {
+    padding: 12px 12px 10px;
+}
+
+.workspace-row {
+    align-items: start;
+    gap: 14px;
+}
+
+.sidebar-stack {
+    position: sticky;
+    top: 16px;
+}
+
+.panel-subtitle {
+    margin: 2px 0 8px;
+    color: var(--brand-ink);
+    font-size: 0.95rem;
+    font-weight: 700;
+}
+
+.panel-note {
+    margin: 0 0 8px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    background: #f5f9ff;
+    color: var(--brand-subtle);
+    font-size: 0.88rem;
+    line-height: 1.5;
+    border: 1px solid rgba(207, 227, 251, 0.9);
+}
+
+.upload-stage-note {
+    margin: 0 0 8px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    background: linear-gradient(180deg, rgba(247, 251, 255, 0.96) 0%, rgba(239, 246, 255, 0.96) 100%);
+    border: 1px solid rgba(210, 227, 244, 0.95);
+    color: var(--brand-subtle);
+    font-size: 0.87rem;
+    line-height: 1.55;
+}
+
+.upload-stage-note strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--brand-ink);
+    font-size: 0.94rem;
 }
 
 .section-title {
     margin: 4px 0 12px;
     padding: 2px 6px;
     color: #193b5e;
-    font-size: 1.02rem;
+    font-size: 1.04rem;
     font-weight: 700;
 }
 
@@ -111,17 +221,150 @@ CUSTOM_CSS = """
     border-radius: 16px !important;
 }
 
+.metric-box textarea,
+.metric-box input {
+    background: linear-gradient(180deg, #f9fbff 0%, #f1f7ff 100%) !important;
+    border: 1px solid rgba(205, 222, 240, 0.95) !important;
+    color: var(--brand-ink) !important;
+    font-weight: 600;
+}
+
+.long-box textarea,
+.long-box input {
+    background: #fbfdff !important;
+    border: 1px solid rgba(214, 228, 242, 0.95) !important;
+    color: #47617b !important;
+}
+
+.button-row {
+    gap: 10px;
+    margin: 6px 0 10px;
+}
+
+.button-row > * {
+    flex: 1 1 0;
+}
+
+.chat-head {
+    margin: 2px 2px 10px;
+    padding: 12px 14px;
+    border-radius: 16px;
+    background: linear-gradient(180deg, rgba(244, 249, 255, 0.96) 0%, rgba(237, 245, 255, 0.96) 100%);
+    border: 1px solid rgba(208, 224, 241, 0.9);
+    color: var(--brand-subtle);
+    font-size: 0.94rem;
+    line-height: 1.55;
+}
+
+.sidebar-primary {
+    margin-bottom: 10px;
+}
+
+.compact-accordion {
+    margin-top: 8px;
+}
+
+.progress-card {
+    border-radius: 18px;
+    padding: 14px 14px 12px;
+    background: linear-gradient(180deg, rgba(246, 251, 255, 0.98) 0%, rgba(237, 245, 255, 0.96) 100%);
+    border: 1px solid rgba(206, 225, 245, 0.95);
+}
+
+.progress-card strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--brand-ink);
+    font-size: 1rem;
+}
+
+.progress-card span {
+    display: block;
+    color: var(--brand-subtle);
+    font-size: 0.87rem;
+    line-height: 1.5;
+}
+
+.progress-track {
+    margin: 10px 0 8px;
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(184, 206, 231, 0.45);
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #4fa3ff 0%, #1b7bff 100%);
+    box-shadow: 0 8px 18px rgba(27, 123, 255, 0.22);
+    transition: width 0.3s ease;
+}
+
+.progress-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.progress-meta b {
+    color: var(--brand-ink);
+    font-size: 0.94rem;
+}
+
+.inline-upload-shell {
+    margin-top: 10px;
+    padding: 12px 14px;
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(248, 251, 255, 0.96) 0%, rgba(239, 246, 255, 0.96) 100%);
+    border: 1px solid rgba(207, 225, 245, 0.95);
+}
+
+.inline-upload-shell .panel-note {
+    margin-bottom: 8px;
+}
+
 .chat-card .bubble-wrap,
 .chat-card .message-wrap {
     font-size: 0.98rem;
 }
 
-.chat-actions {
+.chat-card {
+    min-height: 100%;
+}
+
+.chat-card .wrap {
+    border-radius: 20px;
+}
+
+.composer-row {
+    align-items: end;
+    gap: 10px;
     margin-top: 8px;
 }
 
+.composer-row > :first-child {
+    flex: 1 1 auto;
+}
+
+.composer-row > :last-child {
+    min-width: 128px;
+}
+
+.chat-tip {
+    margin: 8px 4px 2px;
+    color: #6a8198;
+    font-size: 0.88rem;
+}
+
+.chat-actions {
+    margin-top: 0;
+}
+
 .primary-action button {
-    background: linear-gradient(135deg, #1b7bff 0%, #1662d6 100%) !important;
+    background: linear-gradient(135deg, var(--brand-accent) 0%, var(--brand-accent-dark) 100%) !important;
     border: none !important;
     color: white !important;
     box-shadow: 0 14px 28px rgba(27, 123, 255, 0.28);
@@ -134,9 +377,58 @@ CUSTOM_CSS = """
 }
 
 .upload-card {
-    margin-bottom: 12px;
-    padding-bottom: 6px;
+    margin-bottom: 4px;
+    padding: 4px 2px 6px;
     border-bottom: 1px dashed rgba(117, 142, 168, 0.28);
+}
+
+.data-shell {
+    margin-top: 2px;
+}
+
+.data-card .gradio-dataframe {
+    border-radius: 18px;
+    overflow: hidden;
+}
+
+@media (max-width: 1080px) {
+    .hero-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .sidebar-stack {
+        position: static;
+    }
+}
+
+@media (max-width: 780px) {
+    .app-shell {
+        padding: 12px 0 20px;
+    }
+
+    .hero-card,
+    .sidebar-card,
+    .chat-card,
+    .data-card {
+        border-radius: 18px;
+    }
+
+    .hero-card {
+        padding: 18px 18px 14px;
+    }
+
+    .hero-card h1 {
+        font-size: 1.72rem;
+    }
+
+    .button-row,
+    .composer-row {
+        flex-direction: column;
+    }
+
+    .composer-row > :last-child {
+        min-width: 100%;
+    }
 }
 """
 
@@ -151,15 +443,153 @@ COLUMN_NAMES = {
 }
 
 
-def build_progress_text():
-    total_fields = len(metadata)
-    completed_fields = len(tracker.filled_data)
-    if total_fields == 0:
-        return "0/0 (0%)"
+def resolve_field_state(field, cache=None):
+    if cache is None:
+        cache = {}
+    if field in cache:
+        return cache[field]
 
-    progress_ratio = completed_fields / total_fields
-    progress_percent = round(progress_ratio * 100)
-    return f"{completed_fields}/{total_fields} ({progress_percent}%)"
+    if field in tracker.filled_data:
+        cache[field] = "completed"
+        return cache[field]
+
+    dependencies = metadata[field].get("依赖")
+    if not dependencies:
+        cache[field] = "pending"
+        return cache[field]
+
+    parent = dependencies.get("parent")
+    if not parent or parent not in metadata:
+        cache[field] = "pending"
+        return cache[field]
+
+    parent_state = resolve_field_state(parent, cache)
+    if parent_state == "inactive":
+        cache[field] = "inactive"
+        return cache[field]
+
+    if parent not in tracker.filled_data:
+        cache[field] = "pending"
+        return cache[field]
+
+    parent_value = tracker.filled_data[parent].get("value")
+    condition = dependencies.get("condition")
+    opposite_condition = dependencies.get("opposite_condition")
+
+    if condition is not None:
+        allowed_values = condition if isinstance(condition, list) else [condition]
+        cache[field] = "pending" if parent_value in allowed_values else "inactive"
+        return cache[field]
+
+    if opposite_condition is not None:
+        blocked_values = opposite_condition if isinstance(opposite_condition, list) else [opposite_condition]
+        cache[field] = "inactive" if parent_value in blocked_values else "pending"
+        return cache[field]
+
+    cache[field] = "pending"
+    return cache[field]
+
+
+def get_progress_state():
+    state_cache = {}
+    completed_count = 0
+    inactive_count = 0
+
+    for field in metadata:
+        field_state = resolve_field_state(field, state_cache)
+        if field_state == "completed":
+            completed_count += 1
+        elif field_state == "inactive":
+            inactive_count += 1
+
+    relevant_total = max(len(metadata) - inactive_count, 0)
+    progress_percent = 100 if relevant_total == 0 else round((completed_count / relevant_total) * 100)
+
+    return {
+        "completed": completed_count,
+        "inactive": inactive_count,
+        "relevant_total": relevant_total,
+        "percent": progress_percent,
+    }
+
+
+def build_progress_text():
+    progress_state = get_progress_state()
+    return f"{progress_state['completed']}/{progress_state['relevant_total']} ({progress_state['percent']}%)"
+
+
+def build_progress_html():
+    progress_state = get_progress_state()
+    completed = progress_state["completed"]
+    relevant_total = progress_state["relevant_total"]
+    inactive = progress_state["inactive"]
+    percent = progress_state["percent"]
+    summary = f"已完成 {completed} 项"
+    if relevant_total:
+        summary += f" / 当前共需处理 {relevant_total} 项"
+
+    inactive_hint = "当前没有自动跳过项"
+    if inactive:
+        inactive_hint = f"已自动跳过 {inactive} 项条件不满足的问题"
+
+    return f"""
+    <div class="progress-card">
+        <strong>当前完成度 {percent}%</strong>
+        <span>{html.escape(summary)}</span>
+        <div class="progress-track">
+            <div class="progress-fill" style="width: {percent}%;"></div>
+        </div>
+        <div class="progress-meta">
+            <span>{html.escape(inactive_hint)}</span>
+            <b>{completed}/{relevant_total or completed}</b>
+        </div>
+    </div>
+    """
+
+
+def should_reveal_upload_panel(current_field):
+    progress_state = get_progress_state()
+    relevant_total = progress_state["relevant_total"]
+    if relevant_total == 0:
+        return True
+
+    completed_fields = progress_state["completed"]
+    remaining_fields = max(relevant_total - completed_fields, 0)
+    if current_field is None or remaining_fields <= UPLOAD_REVEAL_REMAINING_FIELDS:
+        return True
+
+    field_text = str(current_field or "")
+    if any(keyword in field_text for keyword in UPLOAD_TRIGGER_KEYWORDS):
+        return True
+
+    return (completed_fields / relevant_total) >= UPLOAD_REVEAL_PROGRESS
+
+
+def build_upload_stage_note(current_field):
+    return (
+        "<div class='upload-stage-note'>"
+        "<strong>现在可以上传化验单</strong>"
+        "已经进入化验或检查相关问题阶段，如手头有报告，现在上传会更顺手。"
+        "</div>"
+    )
+
+
+def build_upload_component_updates(current_field, clear_values=False):
+    show_upload_panel = should_reveal_upload_panel(current_field)
+    if clear_values:
+        return (
+            gr.update(value=build_upload_stage_note(current_field), visible=show_upload_panel),
+            gr.update(visible=show_upload_panel, value=None),
+            gr.update(visible=show_upload_panel, value=""),
+            gr.update(visible=show_upload_panel, value=""),
+        )
+
+    return (
+        gr.update(value=build_upload_stage_note(current_field), visible=show_upload_panel),
+        gr.update(visible=show_upload_panel),
+        gr.update(visible=show_upload_panel),
+        gr.update(visible=show_upload_panel),
+    )
 
 
 def export_tracker_data():
@@ -280,6 +710,7 @@ def stream_assistant_messages(
     df,
 ):
     display_history = clone_chat_history(base_history)
+    upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(current_field)
     for message in new_messages:
         role = message.get("role")
         if role != "assistant":
@@ -301,6 +732,10 @@ def stream_assistant_messages(
                 file_path,
                 df,
                 gr.update(interactive=False),
+                upload_note,
+                upload_file_update,
+                upload_status_update,
+                upload_path_update,
             )
         assistant_message["content"] = full_text
 
@@ -313,6 +748,10 @@ def stream_assistant_messages(
         file_path,
         df,
         gr.update(interactive=True),
+        upload_note,
+        upload_file_update,
+        upload_status_update,
+        upload_path_update,
     )
 
 
@@ -335,10 +774,12 @@ def init_system():
         question = generate_question(field, metadata, history_text)
     except Exception as exc:
         add_assistant_message(build_runtime_error_message(exc), chat_history)
-        return "初始化系统失败", chat_history, field, build_progress_text(), file_path, pd.DataFrame()
+        upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(field, clear_values=True)
+        return "初始化系统失败", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update
 
     add_assistant_message(question, chat_history)
-    return "初始化系统成功", chat_history, field, build_progress_text(), file_path, pd.DataFrame()
+    upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(field, clear_values=True)
+    return "初始化系统成功", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update
 
 
 def process_user_input(user_message, chat_history):
@@ -358,7 +799,7 @@ def process_user_input(user_message, chat_history):
         error_message = build_runtime_error_message(exc)
         add_assistant_message(error_message, chat_history)
         df, file_path = export_tracker_data()
-        return "", chat_history, field, build_progress_text(), error_message, file_path, df
+        return "", chat_history, field, build_progress_html(), error_message, file_path, df
     # 先把模型输出归一化，再用字段规则做一次“填表口径”校正。
     result = normalize_parse_result(raw_result)
     result = apply_field_completion_rules(field, result)
@@ -404,9 +845,9 @@ def process_user_input(user_message, chat_history):
         field = tracker.get_next_field()
 
     if field is None:
-        completion_msg = "所有信息已收集完成，请您点击左上角“导出并下载”按钮进行下载！"
+        completion_msg = "所有信息已收集完成，请点击“导出结果”按钮下载随访结果。"
         add_assistant_message(completion_msg, chat_history)
-        return "", chat_history, field, build_progress_text(), parse_output, file_path, df
+        return "", chat_history, field, build_progress_html(), parse_output, file_path, df
 
     history_text = tracker.get_dialogue_history()
     start_question = time.time()
@@ -415,12 +856,12 @@ def process_user_input(user_message, chat_history):
     except Exception as exc:
         error_message = build_runtime_error_message(exc)
         add_assistant_message(error_message, chat_history)
-        return "", chat_history, field, build_progress_text(), error_message, file_path, df
+        return "", chat_history, field, build_progress_html(), error_message, file_path, df
     end_question = time.time()
     print(f"🔍 生成问题 generate_question() 耗时：{end_question - start_question:.2f} 秒")
     add_assistant_message(question, chat_history)
 
-    return "", chat_history, field, build_progress_text(), parse_output, file_path, df
+    return "", chat_history, field, build_progress_html(), parse_output, file_path, df
 
 
 
@@ -442,55 +883,97 @@ def on_edit(edited_df):
 
 with gr.Blocks(title="AI医疗随访系统") as demo:
     with gr.Column(elem_classes=["app-shell"]):
-        gr.HTML(
-            """
-            <div class="hero-card">
-                <div class="hero-badges">
-                    <span>医疗随访助手</span>
-                    <span>结构化信息采集</span>
-                    <span>支持化验单上传</span>
-                </div>
-                <h1>AI 医疗随访对话系统</h1>
-                <p>保留现有随访流程与导出能力，在同一页面里完成对话采集、结果校对与化验单整理。</p>
-            </div>
-            """
-        )
-
-        with gr.Row():
-            with gr.Column(scale=1, elem_classes=["sidebar-card"]):
-                gr.Markdown("### 工具面板", elem_classes=["section-title"])
-                with gr.Group(elem_classes=["upload-card"]):
-                    report_upload = gr.File(
-                        label="上传化验单（.doc/.docx/.pdf/.png/.jpg）",
-                        file_types=ALLOWED_REPORT_FILE_TYPES,
-                        type="filepath",
-                    )
-                    report_status = gr.Textbox(label="上传状态", interactive=False, elem_classes=["compact-box"])
-                    report_saved_path = gr.Textbox(label="文件保存位置", interactive=False, elem_classes=["compact-box"])
-
-                init_btn = gr.Button("初始化系统", variant="primary", elem_classes=["primary-action"])
-                download_btn = gr.DownloadButton(label="导出并下载", value=download_data, visible=True, elem_classes=["soft-action"])
-                status_output = gr.Textbox(label="系统状态", interactive=False, elem_classes=["compact-box"])
-                parse_output = gr.Textbox(label="上一问题解析情况", lines=3, interactive=False, elem_classes=["compact-box"])
-                question_output = gr.Textbox(label="当前字段", interactive=False, elem_classes=["compact-box"])
-                progress_output = gr.Textbox(label="当前进度", interactive=False, elem_classes=["compact-box"])
-            with gr.Column(scale=3, elem_classes=["chat-card"]):
+        with gr.Row(elem_classes=["workspace-row"]):
+            with gr.Column(scale=1, elem_classes=["sidebar-card", "sidebar-stack"]):
+                gr.Markdown("### 随访进度", elem_classes=["section-title"])
+                with gr.Group(elem_classes=["sidebar-primary"]):
+                    progress_output = gr.HTML(build_progress_html())
+                with gr.Row(elem_classes=["button-row"]):
+                    init_btn = gr.Button("重新开始", variant="primary", elem_classes=["primary-action"])
+                    download_btn = gr.DownloadButton(label="导出结果", value=download_data, visible=True, elem_classes=["soft-action"])
+                with gr.Accordion("查看详细状态", open=False, elem_classes=["compact-accordion"]):
+                    question_output = gr.Textbox(label="当前问题主题", interactive=False, elem_classes=["compact-box", "metric-box"])
+                    status_output = gr.Textbox(label="系统状态", interactive=False, elem_classes=["compact-box", "metric-box"])
+                    parse_output = gr.Textbox(label="系统识别详情", lines=4, interactive=False, elem_classes=["compact-box", "long-box"])
+            with gr.Column(scale=4, elem_classes=["chat-card"]):
                 gr.Markdown("### 随访对话", elem_classes=["section-title"])
-                chatbot = gr.Chatbot(label="对话记录", height=520, layout="bubble")
-                msg = gr.Textbox(
-                    label="请输入您的回答",
-                    placeholder="在这里输入您的回答...",
-                    lines=1,
-                    elem_classes=["compact-box"]
+                gr.HTML(
+                    """
+                    <div class="chat-head">
+                        请根据问题直接回答；如果暂时不清楚，也可以回复“不知道”或“稍后补充”。
+                    </div>
+                    """
                 )
-                submit_btn = gr.Button("发送", variant="primary", elem_classes=["primary-action", "chat-actions"])
+                chatbot = gr.Chatbot(label="对话记录", height=620, layout="bubble")
+                with gr.Row(elem_classes=["composer-row"]):
+                    msg = gr.Textbox(
+                        label="请输入您的回答",
+                        placeholder="请在这里输入您的回答",
+                        lines=1,
+                        elem_classes=["compact-box"]
+                    )
+                    submit_btn = gr.Button("发送", variant="primary", elem_classes=["primary-action", "chat-actions"])
+                upload_stage_note = gr.HTML(
+                    build_upload_stage_note(tracker.get_next_field()),
+                    visible=False,
+                    elem_classes=["inline-upload-shell"],
+                )
+                report_upload = gr.File(
+                    label="上传化验单（.doc/.docx/.pdf/.png/.jpg）",
+                    file_types=ALLOWED_REPORT_FILE_TYPES,
+                    type="filepath",
+                    visible=False,
+                    elem_classes=["upload-card"],
+                )
+                report_status = gr.Textbox(
+                    label="上传状态",
+                    interactive=False,
+                    visible=False,
+                    elem_classes=["compact-box", "metric-box"],
+                )
+                report_saved_path = gr.Textbox(
+                    label="文件保存位置",
+                    interactive=False,
+                    visible=False,
+                    elem_classes=["compact-box", "long-box"],
+                )
 
         with gr.Column(elem_classes=["data-card"]):
-            gr.Markdown("### 随访数据表", elem_classes=["section-title"])
-            dataframe_output = gr.Dataframe(label="文件内容", interactive=True)
+            gr.Markdown("### 结果校对", elem_classes=["section-title"])
+            gr.Markdown("如需人工修正，可展开下方表格直接编辑，导出时会保留修改结果。", elem_classes=["chat-tip"])
+            with gr.Accordion("展开或收起随访数据表", open=False, elem_classes=["data-shell"]):
+                dataframe_output = gr.Dataframe(label="文件内容", interactive=True)
 
-    init_btn.click(fn=init_system, outputs=[status_output, chatbot, question_output, progress_output, download_btn, dataframe_output])
-    demo.load(fn=init_system, outputs=[status_output, chatbot, question_output, progress_output, download_btn, dataframe_output])
+    init_btn.click(
+        fn=init_system,
+        outputs=[
+            status_output,
+            chatbot,
+            question_output,
+            progress_output,
+            download_btn,
+            dataframe_output,
+            upload_stage_note,
+            report_upload,
+            report_status,
+            report_saved_path,
+        ],
+    )
+    demo.load(
+        fn=init_system,
+        outputs=[
+            status_output,
+            chatbot,
+            question_output,
+            progress_output,
+            download_btn,
+            dataframe_output,
+            upload_stage_note,
+            report_upload,
+            report_status,
+            report_saved_path,
+        ],
+    )
     download_btn.click(fn=download_data, outputs=download_btn)
     dataframe_output.edit(fn=on_edit, inputs=dataframe_output, outputs=[status_output, download_btn])
     report_upload.upload(fn=save_uploaded_report, inputs=report_upload, outputs=[report_status, report_saved_path])
@@ -506,6 +989,10 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 gr.update(),
                 gr.update(),
                 gr.update(interactive=True),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
             )
             return
 
@@ -521,6 +1008,10 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             gr.update(),
             gr.update(),
             gr.update(interactive=False),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
         )
 
         _, updated_chat_history, current_field, progress_text, parse_text, file_path, df = process_user_input(message, base_history)
@@ -537,6 +1028,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 file_path,
                 df,
                 gr.update(interactive=True),
+                *build_upload_component_updates(current_field),
             )
             return
 
@@ -550,8 +1042,42 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             df,
         )
 
-    msg.submit(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, progress_output, parse_output, download_btn, dataframe_output, submit_btn])
-    submit_btn.click(fn=respond, inputs=[msg, chatbot], outputs=[msg, chatbot, question_output, progress_output, parse_output, download_btn, dataframe_output, submit_btn])
+    msg.submit(
+        fn=respond,
+        inputs=[msg, chatbot],
+        outputs=[
+            msg,
+            chatbot,
+            question_output,
+            progress_output,
+            parse_output,
+            download_btn,
+            dataframe_output,
+            submit_btn,
+            upload_stage_note,
+            report_upload,
+            report_status,
+            report_saved_path,
+        ],
+    )
+    submit_btn.click(
+        fn=respond,
+        inputs=[msg, chatbot],
+        outputs=[
+            msg,
+            chatbot,
+            question_output,
+            progress_output,
+            parse_output,
+            download_btn,
+            dataframe_output,
+            submit_btn,
+            upload_stage_note,
+            report_upload,
+            report_status,
+            report_saved_path,
+        ],
+    )
 
 
 # 保留原有的 main_flow 函数，但不再直接调用
