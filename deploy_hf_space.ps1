@@ -37,17 +37,19 @@ if (Test-Path $publishDir) {
 }
 New-Item -ItemType Directory -Path $publishDir | Out-Null
 
-$nullChar = [char]0
-$trackedFiles = ((git -C $repoRoot ls-files -z) -split $nullChar) | Where-Object { $_ }
+$checkoutOutput = git -C $repoRoot --work-tree="$publishDir" checkout-index -a -f
+if ($LASTEXITCODE -ne 0) {
+    throw "git checkout-index failed."
+}
 
-foreach ($file in $trackedFiles) {
-    $source = Join-Path $repoRoot $file
-    $target = Join-Path $publishDir $file
-    $parent = Split-Path -Parent $target
-    if ($parent -and -not (Test-Path $parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-    Copy-Item -LiteralPath $source -Destination $target -Force
+$uploadedReportsPath = Join-Path $publishDir "uploaded_reports"
+if (Test-Path $uploadedReportsPath) {
+    Remove-Item -LiteralPath $uploadedReportsPath -Recurse -Force
+}
+
+$binaryDocFiles = Get-ChildItem -Path $publishDir -Recurse -File -Include *.doc, *.docx, *.pdf
+foreach ($file in $binaryDocFiles) {
+    Remove-Item -LiteralPath $file.FullName -Force
 }
 
 Get-GitOutput -Args @("init", "-b", $BranchName) -WorkingDirectory $publishDir | Out-Null
