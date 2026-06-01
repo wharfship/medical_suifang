@@ -6,6 +6,15 @@ __pycache__/
 *.py[cod]
 *.log
 *.xlsx
+image_extract_preview/
+uploaded_reports/
+outputs/
+verify_input.jpg
+生化.docx
+deploy_hf_space.ps1
+docs/superpowers/
+image/运行流程图/
+运行流程图.md
 err.txt
 error.txt
 error2.txt
