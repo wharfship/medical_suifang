@@ -2,4 +2,4 @@ from ggg import CUSTOM_CSS, demo
 
 
 if __name__ == "__main__":
-    demo.launch(css=CUSTOM_CSS)
+    demo.launch(css=CUSTOM_CSS, server_name="0.0.0.0", server_port=7860)

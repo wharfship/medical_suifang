@@ -9,6 +9,8 @@ from pathlib import Path
 
 from excel_adjusting import *
 from field_rules import apply_field_completion_rules
+from medical_output_flow import build_output_folder_name, persist_followup_export
+from report_upload_flow import run_report_upload_flow
 from workflow_status import (
     finalize_after_attempt_limit,
     get_field_attempt_limit,
@@ -16,19 +18,20 @@ from workflow_status import (
     normalize_parse_result,
 )
 
-
+FILE_NAME = "最后几个问题.xls"
 BASE_DIR = Path(__file__).resolve().parent
-template_candidates = sorted(BASE_DIR.glob("2025.5.28*excel*.xls"))
-if not template_candidates:
-    raise FileNotFoundError(f"Excel template not found in {BASE_DIR}")
-excel_path = template_candidates[0]
+excel_path = BASE_DIR / FILE_NAME
+if not excel_path.exists():
+    raise FileNotFoundError(f"Excel template not found: {excel_path}")
 metadata = load_excel_template(excel_path)
 tracker = FieldStateTracker(metadata)
 field_attempts = {}
 chat_history = []   # 专门给 gradio 的 Chatbot 用的
+last_report_output_path = ""
+session_output_dir = BASE_DIR / "outputs" / build_output_folder_name()
 
-ALLOWED_REPORT_SUFFIXES = {".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg"}
-ALLOWED_REPORT_FILE_TYPES = [".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg"]
+ALLOWED_REPORT_SUFFIXES = {".docx", ".png", ".jpg", ".jpeg"}
+ALLOWED_REPORT_FILE_TYPES = [".docx", ".png", ".jpg", ".jpeg"]
 UPLOAD_TRIGGER_KEYWORDS = ("化验", "检查", "血生化", "肌酐", "尿常规", "肾脏", "报告")
 UPLOAD_REVEAL_REMAINING_FIELDS = 6
 UPLOAD_REVEAL_PROGRESS = 0.72
@@ -430,6 +433,20 @@ CUSTOM_CSS = """
         min-width: 100%;
     }
 }
+
+#auto-report-download {
+    display: none !important;
+}
+"""
+
+
+AUTO_REPORT_DOWNLOAD_JS = """
+() => {
+    const button = document.querySelector('#auto-report-download button');
+    if (button) {
+        setTimeout(() => button.click(), 150);
+    }
+}
 """
 
 
@@ -682,22 +699,61 @@ def clone_chat_history(history):
 
 
 def save_uploaded_report(uploaded_file):
+    global last_report_output_path
     if not uploaded_file:
-        return "未上传化验单。", ""
+        last_report_output_path = ""
+        return "未上传化验单。", "", None
 
     uploaded_path = Path(uploaded_file)
     suffix = uploaded_path.suffix.lower()
     if suffix not in ALLOWED_REPORT_SUFFIXES:
         allowed_text = "、".join(sorted(ALLOWED_REPORT_SUFFIXES))
-        return f"仅支持以下格式的化验单: {allowed_text}", ""
+        last_report_output_path = ""
+        return f"仅支持以下格式的化验单: {allowed_text}", "", None
 
-    upload_dir = BASE_DIR / "uploaded_reports"
-    upload_dir.mkdir(exist_ok=True)
+    status, output_path = run_report_upload_flow(
+        str(uploaded_path),
+        session_output_dir=session_output_dir,
+    )
+    last_report_output_path = output_path or ""
+    return status, output_path or "", output_path or None
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    target_path = upload_dir / f"{timestamp}_{uploaded_path.name}"
-    shutil.copy2(uploaded_path, target_path)
-    return f"化验单已上传: {target_path.name}", str(target_path)
+
+def advance_after_report_upload(current_chat_history):
+    global tracker
+    updated_chat_history = clone_chat_history(current_chat_history)
+    field = tracker.get_next_field()
+
+    if field is None:
+        df, file_path = export_tracker_data()
+        return updated_chat_history, field, build_progress_html(), "化验单已上传。", file_path, df
+
+    upload_result = {
+        "status": "done",
+        "completion": "complete",
+        "field_value": "已上传化验单",
+        "confidence": 1.0,
+        "reasoning": "用户已通过上传控件补充化验单。",
+        "evidence": "patient: 已上传化验单。",
+    }
+    tracker.update_field(field, upload_result)
+    field_attempts.pop(field, None)
+    add_assistant_message(build_confirmation_message(field, upload_result), updated_chat_history)
+
+    df, file_path = export_tracker_data()
+    next_field = maybe_finalize_bmi(updated_chat_history)
+    df, file_path = export_tracker_data()
+
+    parse_text = f"流程状态: done, 完整度: complete, 置信度: 1.0\n解释: 已将当前问题标记为已上传化验单。"
+    if next_field is None:
+        completion_msg = "所有信息已收集完成，请点击“导出结果”按钮下载随访结果。"
+        add_assistant_message(completion_msg, updated_chat_history)
+        return updated_chat_history, next_field, build_progress_html(), parse_text, file_path, df
+
+    history_text = tracker.get_dialogue_history()
+    question = generate_question(next_field, metadata, history_text)
+    add_assistant_message(question, updated_chat_history)
+    return updated_chat_history, next_field, build_progress_html(), parse_text, file_path, df
 
 
 def stream_assistant_messages(
@@ -736,6 +792,7 @@ def stream_assistant_messages(
                 upload_file_update,
                 upload_status_update,
                 upload_path_update,
+                gr.update(),
             )
         assistant_message["content"] = full_text
 
@@ -752,16 +809,19 @@ def stream_assistant_messages(
         upload_file_update,
         upload_status_update,
         upload_path_update,
+        gr.update(),
     )
 
 
 def init_system():
     """初始化系统, 恢复到初始数据"""
-    global tracker, metadata
+    global tracker, metadata, last_report_output_path, session_output_dir
     metadata = load_excel_template(excel_path)
     tracker = FieldStateTracker(metadata)
     field_attempts.clear()
     chat_history.clear()
+    last_report_output_path = ""
+    session_output_dir = BASE_DIR / "outputs" / build_output_folder_name()
 
     _, file_path = export_tracker_data()
 
@@ -775,11 +835,11 @@ def init_system():
     except Exception as exc:
         add_assistant_message(build_runtime_error_message(exc), chat_history)
         upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(field, clear_values=True)
-        return "初始化系统失败", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update
+        return "初始化系统失败", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update, gr.update()
 
     add_assistant_message(question, chat_history)
     upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(field, clear_values=True)
-    return "初始化系统成功", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update
+    return "初始化系统成功", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update, gr.update()
 
 
 def process_user_input(user_message, chat_history):
@@ -869,8 +929,12 @@ def download_data():
     file_path = BASE_DIR / "medical_data.xlsx"
     if not os.path.exists(file_path):
         _, generated_path = export_tracker_data()
-        return generated_path
-    return str(file_path)
+        file_path = Path(generated_path)
+    return persist_followup_export(
+        file_path,
+        uploaded_report_path=last_report_output_path or None,
+        session_output_dir=session_output_dir,
+    )
 
 
 def on_edit(edited_df):
@@ -919,7 +983,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                     elem_classes=["inline-upload-shell"],
                 )
                 report_upload = gr.File(
-                    label="上传化验单（.doc/.docx/.pdf/.png/.jpg）",
+                    label="上传化验单（.docx/.png/.jpg/.jpeg）",
                     file_types=ALLOWED_REPORT_FILE_TYPES,
                     type="filepath",
                     visible=False,
@@ -936,6 +1000,11 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                     interactive=False,
                     visible=False,
                     elem_classes=["compact-box", "long-box"],
+                )
+                report_download_output = gr.DownloadButton(
+                    label="下载化验单结果",
+                    visible=True,
+                    elem_id="auto-report-download",
                 )
 
         with gr.Column(elem_classes=["data-card"]):
@@ -957,6 +1026,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             report_upload,
             report_status,
             report_saved_path,
+            report_download_output,
         ],
     )
     demo.load(
@@ -972,11 +1042,31 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             report_upload,
             report_status,
             report_saved_path,
+            report_download_output,
         ],
     )
     download_btn.click(fn=download_data, outputs=download_btn)
     dataframe_output.edit(fn=on_edit, inputs=dataframe_output, outputs=[status_output, download_btn])
-    report_upload.upload(fn=save_uploaded_report, inputs=report_upload, outputs=[report_status, report_saved_path])
+    report_upload_event = report_upload.upload(
+        fn=advance_after_report_upload,
+        inputs=chatbot,
+        outputs=[
+            chatbot,
+            question_output,
+            progress_output,
+            parse_output,
+            download_btn,
+            dataframe_output,
+        ],
+    )
+    report_upload_event.then(
+        fn=save_uploaded_report,
+        inputs=report_upload,
+        outputs=[report_status, report_saved_path, report_download_output],
+    ).then(
+        fn=None,
+        js=AUTO_REPORT_DOWNLOAD_JS,
+    )
 
     def respond(message, chat_history):
         if not message or not message.strip():
@@ -989,6 +1079,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 gr.update(),
                 gr.update(),
                 gr.update(interactive=True),
+                gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(),
@@ -1012,6 +1103,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             gr.update(),
             gr.update(),
             gr.update(),
+            gr.update(),
         )
 
         _, updated_chat_history, current_field, progress_text, parse_text, file_path, df = process_user_input(message, base_history)
@@ -1029,6 +1121,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 df,
                 gr.update(interactive=True),
                 *build_upload_component_updates(current_field),
+                gr.update(),
             )
             return
 
@@ -1058,6 +1151,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             report_upload,
             report_status,
             report_saved_path,
+            report_download_output,
         ],
     )
     submit_btn.click(
@@ -1076,6 +1170,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             report_upload,
             report_status,
             report_saved_path,
+            report_download_output,
         ],
     )
 

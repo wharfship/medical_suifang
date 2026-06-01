@@ -22,6 +22,17 @@ function Get-GitOutput {
     return $output
 }
 
+function Remove-PathIfExists {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    }
+}
+
 $repoRoot = [string](Get-GitOutput -Args @("rev-parse", "--show-toplevel") | Select-Object -First 1)
 $repoRoot = $repoRoot.Trim()
 $remoteUrl = [string](Get-GitOutput -Args @("remote", "get-url", $RemoteName) -WorkingDirectory $repoRoot | Select-Object -First 1)
@@ -32,19 +43,60 @@ $userEmail = [string](Get-GitOutput -Args @("config", "user.email") -WorkingDire
 $userEmail = $userEmail.Trim()
 
 $publishDir = Join-Path $env:TEMP "hf-space-publish"
-if (Test-Path $publishDir) {
-    Remove-Item -LiteralPath $publishDir -Recurse -Force
-}
+Remove-PathIfExists -Path $publishDir
 New-Item -ItemType Directory -Path $publishDir | Out-Null
 
-$checkoutOutput = git -C $repoRoot --work-tree="$publishDir" checkout-index -a -f
-if ($LASTEXITCODE -ne 0) {
-    throw "git checkout-index failed."
+$robocopyArgs = @(
+    $repoRoot,
+    $publishDir,
+    "/MIR",
+    "/XD",
+    (Join-Path $repoRoot ".git")
+)
+
+& robocopy @robocopyArgs | Out-Null
+if ($LASTEXITCODE -gt 7) {
+    throw "Workspace copy to publish directory failed."
 }
 
-$uploadedReportsPath = Join-Path $publishDir "uploaded_reports"
-if (Test-Path $uploadedReportsPath) {
-    Remove-Item -LiteralPath $uploadedReportsPath -Recurse -Force
+$excludedDirectories = @(
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    ".venv",
+    ".gradio",
+    "image",
+    "image_extract_preview",
+    "outputs",
+    "uploaded_reports"
+)
+foreach ($directoryName in $excludedDirectories) {
+    $matchingDirectories = Get-ChildItem -Path $publishDir -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq $directoryName }
+    foreach ($directory in $matchingDirectories) {
+        Remove-PathIfExists -Path $directory.FullName
+    }
+
+    $topLevelDirectory = Join-Path $publishDir $directoryName
+    Remove-PathIfExists -Path $topLevelDirectory
+}
+
+$excludedFiles = @(
+    "medical_data.xlsx",
+    "verify_input.jpg",
+    "~$*",
+    "*.log",
+    "err.txt",
+    "error.txt",
+    "error2.txt",
+    "run_err.txt",
+    "_xls_output.txt"
+)
+foreach ($pattern in $excludedFiles) {
+    $matchingFiles = Get-ChildItem -Path $publishDir -Recurse -File -Force -Filter $pattern -ErrorAction SilentlyContinue
+    foreach ($file in $matchingFiles) {
+        Remove-Item -LiteralPath $file.FullName -Force
+    }
 }
 
 $binaryDocFiles = Get-ChildItem -Path $publishDir -Recurse -File -Include *.doc, *.docx, *.pdf

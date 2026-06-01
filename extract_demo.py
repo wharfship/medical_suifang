@@ -1,27 +1,27 @@
-import tempfile
-
 import gradio as gr
-import pandas as pd
 
-from lab_report_extractor import (
-    build_display_rows,
-    export_rows_to_xlsx,
-    extract_lab_items_from_file,
-)
+from report_upload_flow import run_report_upload_flow
 
 
 def run_extraction(file_path):
-    if not file_path:
-        return "请先上传文件。", pd.DataFrame(columns=["项目名称", "结果", "单位"]), None
+    return run_report_upload_flow(file_path)
 
-    try:
-        rows = extract_lab_items_from_file(file_path)
-    except Exception as exc:
-        return f"提取失败：{exc}", pd.DataFrame(columns=["项目名称", "结果", "单位"]), None
 
-    display_rows = build_display_rows(rows)
-    output_path = export_rows_to_xlsx(rows, tempfile.gettempdir(), "lab_extract_result")
-    return "提取完成", pd.DataFrame(display_rows), output_path
+AUTO_DOWNLOAD_JS = """
+() => {
+    const button = document.querySelector('#auto-download button');
+    if (button) {
+        setTimeout(() => button.click(), 150);
+    }
+}
+"""
+
+
+CUSTOM_CSS = """
+#auto-download {
+    display: none !important;
+}
+"""
 
 
 with gr.Blocks(title="化验单提取演示") as demo:
@@ -33,15 +33,22 @@ with gr.Blocks(title="化验单提取演示") as demo:
     )
     extract_button = gr.Button("开始提取", variant="primary")
     status_output = gr.Textbox(label="状态", interactive=False)
-    table_output = gr.Dataframe(label="提取结果", interactive=False)
-    file_output = gr.File(label="下载 xlsx")
+    download_output = gr.DownloadButton(
+        label="下载结果",
+        visible=True,
+        elem_id="auto-download",
+    )
 
-    extract_button.click(
+    extract_event = extract_button.click(
         fn=run_extraction,
         inputs=file_input,
-        outputs=[status_output, table_output, file_output],
+        outputs=[status_output, download_output],
+    )
+    extract_event.then(
+        fn=None,
+        js=AUTO_DOWNLOAD_JS,
     )
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(css=CUSTOM_CSS)
