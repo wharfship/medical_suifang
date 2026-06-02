@@ -9,7 +9,7 @@ from pathlib import Path
 
 from excel_adjusting import *
 from field_rules import apply_field_completion_rules
-from medical_output_flow import build_output_folder_name, persist_followup_export
+from medical_output_flow import DEFAULT_PATIENT_NAME, persist_followup_export
 from report_upload_flow import run_report_upload_flow
 from workflow_status import (
     finalize_after_attempt_limit,
@@ -28,7 +28,7 @@ tracker = FieldStateTracker(metadata)
 field_attempts = {}
 chat_history = []   # 专门给 gradio 的 Chatbot 用的
 last_report_output_path = ""
-session_output_dir = BASE_DIR / "outputs" / build_output_folder_name()
+PATIENT_NAME = DEFAULT_PATIENT_NAME
 
 ALLOWED_REPORT_SUFFIXES = {".docx", ".png", ".jpg", ".jpeg"}
 ALLOWED_REPORT_FILE_TYPES = [".docx", ".png", ".jpg", ".jpeg"]
@@ -713,7 +713,7 @@ def save_uploaded_report(uploaded_file):
 
     status, output_path = run_report_upload_flow(
         str(uploaded_path),
-        session_output_dir=session_output_dir,
+        patient_name=PATIENT_NAME,
     )
     last_report_output_path = output_path or ""
     return status, output_path or "", output_path or None
@@ -815,13 +815,12 @@ def stream_assistant_messages(
 
 def init_system():
     """初始化系统, 恢复到初始数据"""
-    global tracker, metadata, last_report_output_path, session_output_dir
+    global tracker, metadata, last_report_output_path
     metadata = load_excel_template(excel_path)
     tracker = FieldStateTracker(metadata)
     field_attempts.clear()
     chat_history.clear()
     last_report_output_path = ""
-    session_output_dir = BASE_DIR / "outputs" / build_output_folder_name()
 
     _, file_path = export_tracker_data()
 
@@ -933,7 +932,7 @@ def download_data():
     return persist_followup_export(
         file_path,
         uploaded_report_path=last_report_output_path or None,
-        session_output_dir=session_output_dir,
+        patient_name=PATIENT_NAME,
     )
 
 

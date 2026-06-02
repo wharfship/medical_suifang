@@ -2,15 +2,18 @@ import os
 import tempfile
 import unittest
 
-from medical_output_flow import build_output_folder_name, persist_followup_export
+from medical_output_flow import ensure_patient_output_dir, persist_followup_export
+
+PATIENT_NAME = "\u674e\u540c\u5b66"
 
 
 class MedicalOutputPersistenceTests(unittest.TestCase):
-    def test_persist_followup_export_saves_excel_and_uploaded_report_in_unique_output_folder(self):
+    def test_persist_followup_export_saves_excel_and_uploaded_report_in_patient_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_excel_path = os.path.join(temp_dir, "medical_data.xlsx")
             uploaded_report_path = os.path.join(temp_dir, "report.pdf")
             output_dir = os.path.join(temp_dir, "outputs")
+            patient_name = PATIENT_NAME
 
             with open(source_excel_path, "wb") as handle:
                 handle.write(b"fake-excel")
@@ -21,14 +24,16 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 source_excel_path,
                 output_dir=output_dir,
                 uploaded_report_path=uploaded_report_path,
+                patient_name=patient_name,
             )
 
             submission_dir = os.path.dirname(output_path)
             copied_report_path = os.path.join(submission_dir, "report.pdf")
+            expected_dir = os.path.join(output_dir, patient_name)
 
             self.assertTrue(os.path.exists(output_path))
             self.assertTrue(os.path.isdir(submission_dir))
-            self.assertTrue(str(output_path).startswith(output_dir))
+            self.assertEqual(submission_dir, expected_dir)
             self.assertEqual(os.path.basename(output_path), "medical_data.xlsx")
             self.assertTrue(os.path.exists(copied_report_path))
             with open(copied_report_path, "rb") as handle:
@@ -46,30 +51,58 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 source_excel_path,
                 output_dir=output_dir,
                 uploaded_report_path=os.path.join(temp_dir, "missing.xlsx"),
+                patient_name=PATIENT_NAME,
             )
 
             self.assertTrue(os.path.exists(output_path))
             self.assertEqual(len(os.listdir(os.path.dirname(output_path))), 1)
 
-    def test_build_output_folder_name_returns_unique_folder_name(self):
-        first_folder_name = build_output_folder_name()
-        second_folder_name = build_output_folder_name()
+    def test_ensure_patient_output_dir_uses_patient_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = os.path.join(temp_dir, "outputs")
 
-        self.assertNotEqual(first_folder_name, second_folder_name)
+            patient_output_dir = ensure_patient_output_dir(output_dir=output_dir, patient_name=PATIENT_NAME)
 
-    def test_persist_followup_export_reuses_given_session_output_dir(self):
+            self.assertEqual(str(patient_output_dir), os.path.join(output_dir, PATIENT_NAME))
+            self.assertTrue(os.path.isdir(str(patient_output_dir)))
+
+    def test_persist_followup_export_overwrites_existing_files_in_patient_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_excel_path = os.path.join(temp_dir, "medical_data.xlsx")
-            session_output_dir = os.path.join(temp_dir, "outputs", "session-001")
+            uploaded_report_path = os.path.join(temp_dir, "report.pdf")
+            output_dir = os.path.join(temp_dir, "outputs")
+            patient_output_dir = os.path.join(output_dir, PATIENT_NAME)
 
             with open(source_excel_path, "wb") as handle:
-                handle.write(b"fake-excel")
+                handle.write(b"first-excel")
+            with open(uploaded_report_path, "wb") as handle:
+                handle.write(b"first-report")
 
-            first_output_path = persist_followup_export(source_excel_path, session_output_dir=session_output_dir)
-            second_output_path = persist_followup_export(source_excel_path, session_output_dir=session_output_dir)
+            first_output_path = persist_followup_export(
+                source_excel_path,
+                output_dir=output_dir,
+                uploaded_report_path=uploaded_report_path,
+                patient_name=PATIENT_NAME,
+            )
 
-            self.assertEqual(os.path.dirname(first_output_path), session_output_dir)
-            self.assertEqual(os.path.dirname(second_output_path), session_output_dir)
+            with open(source_excel_path, "wb") as handle:
+                handle.write(b"second-excel")
+            with open(uploaded_report_path, "wb") as handle:
+                handle.write(b"second-report")
+
+            second_output_path = persist_followup_export(
+                source_excel_path,
+                output_dir=output_dir,
+                uploaded_report_path=uploaded_report_path,
+                patient_name=PATIENT_NAME,
+            )
+
+            self.assertEqual(os.path.dirname(first_output_path), patient_output_dir)
+            self.assertEqual(os.path.dirname(second_output_path), patient_output_dir)
+            with open(second_output_path, "rb") as handle:
+                self.assertEqual(handle.read(), b"second-excel")
+            with open(os.path.join(patient_output_dir, "report.pdf"), "rb") as handle:
+                self.assertEqual(handle.read(), b"second-report")
 
 
 if __name__ == "__main__":

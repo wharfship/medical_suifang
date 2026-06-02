@@ -18,6 +18,8 @@ from lab_report_extractor import (
 )
 from report_upload_flow import run_report_upload_flow
 
+PATIENT_NAME = "\u674e\u540c\u5b66"
+
 
 class FakeMessage:
     def __init__(self, content):
@@ -258,7 +260,7 @@ class ExtractDemoTests(unittest.TestCase):
 
 
 class ExtractDemoOutputPersistenceTests(unittest.TestCase):
-    def test_run_report_upload_flow_saves_excel_and_original_file_in_unique_output_folder(self):
+    def test_run_report_upload_flow_saves_excel_and_original_file_in_patient_folder(self):
         full_rows = [
             {
                 "item_name": "Albumin",
@@ -272,25 +274,30 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = os.path.join(temp_dir, "outputs")
             source_path = os.path.join(temp_dir, "input.jpg")
+            patient_name = PATIENT_NAME
             with open(source_path, "wb") as handle:
                 handle.write(b"fake-image")
 
             with patch("report_upload_flow.extract_lab_items_from_file", return_value=full_rows):
-                status, output_path = run_report_upload_flow(source_path, output_dir=output_dir)
+                status, output_path = run_report_upload_flow(
+                    source_path,
+                    output_dir=output_dir,
+                    patient_name=patient_name,
+                )
 
             self.assertTrue(os.path.exists(output_path))
             submission_dir = os.path.dirname(output_path)
             copied_input_path = os.path.join(submission_dir, "input.jpg")
             self.assertTrue(os.path.isdir(submission_dir))
+            self.assertEqual(submission_dir, os.path.join(output_dir, patient_name))
             self.assertTrue(os.path.exists(copied_input_path))
             with open(copied_input_path, "rb") as handle:
                 self.assertEqual(handle.read(), b"fake-image")
 
         self.assertTrue(status)
-        self.assertTrue(str(output_path).startswith(output_dir))
         self.assertTrue(str(output_path).endswith(".xlsx"))
 
-    def test_run_report_upload_flow_generates_unique_output_folder_each_time(self):
+    def test_run_report_upload_flow_overwrites_existing_files_in_patient_folder(self):
         full_rows = [
             {
                 "item_name": "Albumin",
@@ -305,15 +312,32 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
             output_dir = os.path.join(temp_dir, "outputs")
             source_path = os.path.join(temp_dir, "input.jpg")
             with open(source_path, "wb") as handle:
-                handle.write(b"fake-image")
+                handle.write(b"fake-image-1")
 
             with patch("report_upload_flow.extract_lab_items_from_file", return_value=full_rows):
-                _, first_output_path = run_report_upload_flow(source_path, output_dir=output_dir)
-                _, second_output_path = run_report_upload_flow(source_path, output_dir=output_dir)
+                _, first_output_path = run_report_upload_flow(
+                    source_path,
+                    output_dir=output_dir,
+                    patient_name=PATIENT_NAME,
+                )
 
-        self.assertNotEqual(os.path.dirname(first_output_path), os.path.dirname(second_output_path))
+            with open(source_path, "wb") as handle:
+                handle.write(b"fake-image-2")
 
-    def test_run_report_upload_flow_reuses_given_session_output_dir(self):
+            with patch("report_upload_flow.extract_lab_items_from_file", return_value=full_rows):
+                _, second_output_path = run_report_upload_flow(
+                    source_path,
+                    output_dir=output_dir,
+                    patient_name=PATIENT_NAME,
+                )
+
+            self.assertEqual(os.path.dirname(first_output_path), os.path.dirname(second_output_path))
+            self.assertEqual(first_output_path, second_output_path)
+            patient_dir = os.path.dirname(second_output_path)
+            with open(os.path.join(patient_dir, "input.jpg"), "rb") as handle:
+                self.assertEqual(handle.read(), b"fake-image-2")
+
+    def test_run_report_upload_flow_reuses_given_patient_output_dir(self):
         full_rows = [
             {
                 "item_name": "Albumin",
@@ -326,7 +350,7 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = os.path.join(temp_dir, "outputs")
-            session_output_dir = os.path.join(output_dir, "session-001")
+            patient_output_dir = os.path.join(output_dir, PATIENT_NAME)
             source_path = os.path.join(temp_dir, "input.jpg")
             with open(source_path, "wb") as handle:
                 handle.write(b"fake-image")
@@ -335,10 +359,10 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
                 _, output_path = run_report_upload_flow(
                     source_path,
                     output_dir=output_dir,
-                    session_output_dir=session_output_dir,
+                    patient_output_dir=patient_output_dir,
                 )
 
-        self.assertEqual(os.path.dirname(output_path), session_output_dir)
+        self.assertEqual(os.path.dirname(output_path), patient_output_dir)
 
 
 if __name__ == "__main__":

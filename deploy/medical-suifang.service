@@ -1,0 +1,15 @@
+[Unit]
+Description=Medical Suifang Gradio App
+After=network.target
+
+[Service]
+Type=simple
+User=suifang
+WorkingDirectory=/home/suifang/medical_suifang
+EnvironmentFile=/etc/medical_suifang.env
+ExecStart=/home/suifang/.venv/bin/python /home/suifang/medical_suifang/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
