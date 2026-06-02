@@ -1,11 +1,12 @@
 # Deployment Files
 
-This directory stores the files needed to run the Gradio app with `systemd` on the server.
+This directory stores the files needed to run the Gradio app with `systemd` and expose it through `nginx`.
 
 ## Files
 
 - `medical-suifang.service`: systemd service template for the Gradio app
 - `medical_suifang.env.example`: environment variable example file
+- `nginx-medical-suifang.conf`: nginx reverse proxy template for domain access
 
 ## Server Assumptions
 
@@ -67,3 +68,66 @@ When you update the code later:
 git pull
 sudo systemctl restart medical-suifang
 ```
+
+## IP Access With Nginx
+
+Use nginx if you want users to open the app with a normal address such as `http://your-server-ip` instead of `http://your-server-ip:7860`.
+
+### Before You Start
+
+Make sure all of the following are true:
+
+- The Gradio app is already running through `systemd`
+- The server firewall already allows port `80`
+
+### Install Nginx
+
+On Ubuntu or Debian:
+
+```bash
+sudo apt update
+sudo apt install -y nginx
+```
+
+### Install The Nginx Config
+
+This template is already configured for direct IP access, so you can copy it into nginx directly:
+
+```bash
+sudo cp deploy/nginx-medical-suifang.conf /etc/nginx/conf.d/medical-suifang.conf
+```
+
+### Check And Reload
+
+```bash
+sudo nginx -t
+sudo systemctl enable nginx
+sudo systemctl restart nginx
+sudo systemctl status nginx
+```
+
+### Verify
+
+After nginx starts cleanly, open:
+
+```text
+http://your-server-ip
+```
+
+At that point, you no longer need to expose `:7860` to users.
+
+## Optional: Switch To A Domain Later
+
+If you buy a domain later, update:
+
+```nginx
+server_name _;
+```
+
+to something like:
+
+```nginx
+server_name your-domain.com www.your-domain.com;
+```
+
+Then point the domain's `A` record to this server and reload nginx.
