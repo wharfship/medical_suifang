@@ -97,6 +97,12 @@ This template is already configured for direct IP access, so you can copy it int
 sudo cp deploy/nginx-medical-suifang.conf /etc/nginx/conf.d/medical-suifang.conf
 ```
 
+If nginx is still showing its welcome page, disable the packaged default site first:
+
+```bash
+sudo rm -f /etc/nginx/sites-enabled/default
+```
+
 ### Check And Reload
 
 ```bash
