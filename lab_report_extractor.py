@@ -5,10 +5,12 @@ import os
 import re
 import tempfile
 import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 from openai import OpenAI
+from PIL import Image
 
 
 DISPLAY_COLUMNS = ["项目名称", "结果", "单位"]
@@ -16,6 +18,7 @@ DEFAULT_VISION_MODEL = "qwen-vl-ocr-latest"
 LEGACY_WORD_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 WORD_FORMAT_XML_DOCUMENT = 16
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+BOTTOM_CROP_START_RATIO = 0.42
 
 RESULT_ABBREVIATION_PATTERN = re.compile(r"^[A-Z][A-Z0-9/\-]{1,12}$")
 RESULT_VALUE_PATTERN = re.compile(r"[0-9]|阴性|阳性|正常|异常|未见|<|>|↑|↓")
@@ -35,6 +38,14 @@ UNIT_LIKE_PATTERN = re.compile(
     r"|%"
     r")$"
 )
+CREATININE_FOLLOWUP_FIELD = "血生化：血清肌酐"
+URINE_FOLLOWUP_FIELD = "尿常规：尿蛋白、尿潜血"
+CREATININE_ITEM_ALIASES = ("肌酐（酶法）", "肌酐(酶法)", "肌酐")
+CREATININE_ABBR_ALIASES = ("CR", "CREA", "CRE")
+URINE_OCCULT_BLOOD_ALIASES = ("潜血", "尿潜血", "浅血")
+URINE_OCCULT_BLOOD_ABBR_ALIASES = ("BLD",)
+URINE_PROTEIN_ALIASES = ("蛋白质", "尿蛋白", "蛋白", "蛋白貭")
+URINE_PROTEIN_ABBR_ALIASES = ("PRO",)
 
 EXTRACTION_PROMPT = """
 You will receive an image of a lab report. Extract only the first patient's rows.
@@ -50,7 +61,7 @@ Return JSON only:
 {"items":[{"item_name":"","abbr":"","result":"","unit":"","reference_range":""}]}
 
 Rules:
-1. Copy all five columns for every visible row.
+1. Copy all five columns for every visible row in the entire image.
 2. `item_name` = column 1 Chinese name.
 3. `abbr` = column 2 English abbreviation.
 4. `result` = column 3 actual result only.
@@ -58,6 +69,10 @@ Rules:
 6. `reference_range` = column 5 reference range only.
 7. Do not move column 2 or column 4 into `result`.
 8. If no valid rows are visible, return {"items":[]}.
+9. Read the table from top to bottom and do not stop after the first section.
+10. Some reports contain multiple sections in one image. Extract rows from all visible sections if they belong to the same lab table.
+11. Do not omit rows in the lower half of the image.
+12. Continue extracting until the last visible row of the table.
 """.strip()
 
 RETRY_EXTRACTION_PROMPT = """
@@ -89,6 +104,60 @@ def build_display_rows(rows):
         }
         for row in rows
     ]
+
+
+def _normalize_item_name(value):
+    return re.sub(r"\s+", "", str(value or "")).strip()
+
+
+def _normalize_abbr(value):
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).strip().upper()
+
+
+def _find_result_by_item_aliases(rows, aliases):
+    normalized_aliases = tuple(_normalize_item_name(alias) for alias in aliases)
+    for row in rows or []:
+        item_name = _normalize_item_name(row.get("item_name", ""))
+        if not item_name:
+            continue
+        if any(alias and alias in item_name for alias in normalized_aliases):
+            return str(row.get("result", "")).strip()
+    return None
+
+
+def _find_result_by_abbr_aliases(rows, aliases):
+    normalized_aliases = tuple(_normalize_abbr(alias) for alias in aliases)
+    for row in rows or []:
+        abbr = _normalize_abbr(row.get("abbr", ""))
+        if not abbr:
+            continue
+        if abbr in normalized_aliases:
+            return str(row.get("result", "")).strip()
+    return None
+
+
+def extract_followup_value_from_rows(field, rows):
+    if field == CREATININE_FOLLOWUP_FIELD:
+        item_match = _find_result_by_item_aliases(rows, CREATININE_ITEM_ALIASES)
+        if item_match:
+            return item_match
+        return _find_result_by_abbr_aliases(rows, CREATININE_ABBR_ALIASES)
+
+    if field == URINE_FOLLOWUP_FIELD:
+        occult_blood = _find_result_by_item_aliases(rows, URINE_OCCULT_BLOOD_ALIASES)
+        if not occult_blood:
+            occult_blood = _find_result_by_abbr_aliases(rows, URINE_OCCULT_BLOOD_ABBR_ALIASES)
+        protein = _find_result_by_item_aliases(rows, URINE_PROTEIN_ALIASES)
+        if not protein:
+            protein = _find_result_by_abbr_aliases(rows, URINE_PROTEIN_ABBR_ALIASES)
+        parts = []
+        if occult_blood:
+            parts.append(f"尿潜血：{occult_blood}")
+        if protein:
+            parts.append(f"尿蛋白：{protein}")
+        return "；".join(parts) if parts else None
+
+    return None
 
 
 def normalize_extracted_items(items):
@@ -127,6 +196,11 @@ def _build_image_payload(file_path):
         mime_type = "image/png"
     with open(file_path, "rb") as handle:
         data = base64.b64encode(handle.read()).decode("utf-8")
+    return f"data:{mime_type};base64,{data}"
+
+
+def _build_image_payload_from_bytes(image_bytes, mime_type="image/png"):
+    data = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{data}"
 
 
@@ -199,6 +273,24 @@ def extract_first_image_payload(file_path):
         mime_type = "image/png"
     data = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{data}"
+
+
+def extract_bottom_crop_payload(file_path, start_ratio=BOTTOM_CROP_START_RATIO):
+    file_path = str(file_path)
+    suffix = Path(file_path).suffix.lower()
+    if suffix not in SUPPORTED_IMAGE_SUFFIXES:
+        return None
+
+    with Image.open(file_path) as image:
+        width, height = image.size
+        crop_start = int(height * start_ratio)
+        if crop_start <= 0 or crop_start >= height:
+            return None
+        cropped = image.crop((0, crop_start, width, height))
+        buffer = BytesIO()
+        cropped.save(buffer, format="PNG")
+
+    return _build_image_payload_from_bytes(buffer.getvalue(), mime_type="image/png")
 
 
 def get_vision_client():
@@ -277,6 +369,18 @@ def should_retry_for_result_column(rows):
     )
 
 
+def needs_bottom_crop_retry(rows):
+    if not rows:
+        return False
+
+    abbrs = {_normalize_abbr(row.get("abbr", "")) for row in rows}
+    urine_sediment_abbrs = {"RBC", "WBC", "WBCC", "BACT", "XTAC", "SQEP", "NSE", "HYAL", "UNCC", "BYST", "MUCS"}
+    urine_chemistry_abbrs = {"URO", "BIL", "KET", "BLD", "PRO", "NIT", "LEU", "GLU", "SG", "PH"}
+    has_urine_sediment = any(abbr in urine_sediment_abbrs for abbr in abbrs)
+    has_urine_chemistry = any(abbr in urine_chemistry_abbrs for abbr in abbrs)
+    return has_urine_sediment and not has_urine_chemistry
+
+
 def extract_lab_items_from_file(file_path, client=None, model=DEFAULT_VISION_MODEL):
     image_payload = extract_first_image_payload(file_path)
     vision_client = client or get_vision_client()
@@ -294,4 +398,36 @@ def extract_lab_items_from_file(file_path, client=None, model=DEFAULT_VISION_MOD
 
     if not rows:
         raise ValueError("未识别到有效化验项目。")
+    return rows
+
+
+def extract_lab_items_from_file(file_path, client=None, model=DEFAULT_VISION_MODEL):
+    image_payload = extract_first_image_payload(file_path)
+    vision_client = client or get_vision_client()
+
+    rows = _call_extraction_model(vision_client, model, image_payload, EXTRACTION_PROMPT)
+    if should_retry_for_result_column(rows):
+        retried_rows = _call_extraction_model(
+            vision_client,
+            model,
+            image_payload,
+            RETRY_EXTRACTION_PROMPT,
+        )
+        if retried_rows:
+            rows = retried_rows
+
+    if needs_bottom_crop_retry(rows):
+        bottom_payload = extract_bottom_crop_payload(file_path)
+        if bottom_payload:
+            bottom_rows = _call_extraction_model(
+                vision_client,
+                model,
+                bottom_payload,
+                EXTRACTION_PROMPT,
+            )
+            if bottom_rows:
+                rows = normalize_extracted_items([*rows, *bottom_rows])
+
+    if not rows:
+        raise ValueError("No valid lab items were extracted.")
     return rows

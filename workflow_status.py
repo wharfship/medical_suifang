@@ -1,5 +1,6 @@
 CANONICAL_STATUSES = {"done", "ask_again", "later", "manual_review"}
 COMPLETION_LEVELS = {"complete", "partial", "empty"}
+HOSPITAL_CHECK_GATE_FIELD = "请问您最近有去医院进行检查吗？"
 
 LEGACY_STATUS_MAPPING = {
     "success": ("done", "complete"),
@@ -19,6 +20,22 @@ def clamp_confidence(value):
     return max(0.0, min(1.0, numeric_value))
 
 
+def normalize_gate_field_value(field, value):
+    text = str(value or "").strip()
+    if field != HOSPITAL_CHECK_GATE_FIELD or not text:
+        return text
+
+    if any(token in text for token in ("不知", "不清楚", "记不清", "忘了", "不确定", "说不清")):
+        return "未知"
+    if any(token in text for token in ("没去", "没有去", "没查", "没有查", "没做检查", "没有做检查", "未检查", "没复查", "没有复查")):
+        return "否"
+    if any(token in text for token in ("去过", "查过", "检查过", "做过检查", "复查过", "去医院查了", "去医院做了")):
+        return "是"
+    if text in {"是", "否", "未知"}:
+        return text
+    return text
+
+
 def infer_completion(status, field_value):
     has_value = bool(str(field_value or "").strip())
     if status == "done":
@@ -32,7 +49,8 @@ def normalize_parse_result(raw_result):
     result = dict(raw_result or {})
     raw_status = str(result.get("status", "") or "").strip()
     raw_completion = str(result.get("completion", "") or "").strip()
-    field_value = str(result.get("field_value", "") or "").strip()
+    field = str(result.get("field", "") or "").strip()
+    field_value = normalize_gate_field_value(field, str(result.get("field_value", "") or "").strip())
     reasoning = str(result.get("reasoning", "") or "").strip()
     evidence = str(result.get("evidence", "") or "").strip()
 

@@ -9,7 +9,7 @@ DEFAULT_MAX_ATTEMPTS = {
     "当前有无糖尿病": 1,
     "是否曾患冠心病": 1,
     "是否曾患脑血管病": 1,
-    "近一年是否存在手术切口疼痛": 1,
+    "近一年是否存在手术切口疼痛": 2,
     "（若有高血压）是否为过去一年新发": 1,
     "（若有糖尿病）是否为过去一年新发": 1,
     "（若曾患冠心病）是否为过去一年新发": 1,
@@ -29,19 +29,29 @@ DEFAULT_MAX_ATTEMPTS = {
     "（若曾患冠心病）罹患冠心病至今时间": 2,
     "（若曾患脑血管病）罹患脑血管病至今时间": 2,
     "其余病史及用药情况": 2,
-    "近一年是否存在手术切口疼痛": 1,
     "（若存在手术切口疼痛）手术切口疼痛持续时间": 2,
-    "（若存在手术切口疼痛）疼痛程度评分": 1,
+    "（若存在手术切口疼痛）疼痛程度评分": 2,
     "随访时受者状态": 2,
-    "血生化：血清肌酐": 1,
-    "尿常规：尿蛋白、尿潜血": 1,
-    "肾脏彩超": 1,
+    "血生化：血清肌酐": 3,
+    "尿常规：尿蛋白、尿潜血": 3,
+    "肾脏彩超": 3,
+    "请问您最近有去医院进行检查吗？": 2,
     # ---- 复杂多子问题，4次 ----
     "（若有高血压）药物控制方案": 4,
     "（若有糖尿病）药物控制方案": 4,
     "（若曾患冠心病）治疗方式": 4,
     "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症": 4,
     "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果": 4,
+}
+
+HOSPITAL_CHECK_GATE_FIELD = "请问您最近有去医院进行检查吗？"
+HOSPITAL_CHECK_CHILD_FIELDS = (
+    "血生化：血清肌酐",
+    "尿常规：尿蛋白、尿潜血",
+    "肾脏彩超",
+)
+FIELD_EXAMPLE_OVERRIDES = {
+    "随访时受者状态": "请告诉我最近一次检查中您的受者状态。A:移植肾功能正常（在检查医院肌酐指标的正常范围内）  B:移植肾功能不全（高于检查医院肌酐指标的正常范围） C:恢复透析（受者恢复透析状态） D：受者死亡",
 }
 
 
@@ -110,9 +120,33 @@ def load_excel_template(file_path):
 
         field_info[field] = {
             '描述': description,
-            '示例': example,
+            '示例': FIELD_EXAMPLE_OVERRIDES.get(field, example),
             '依赖': dependencies,
             '追问上限': max_attempts
         }
+
+    if all(field in field_info for field in HOSPITAL_CHECK_CHILD_FIELDS):
+        ordered_items = list(field_info.items())
+        first_child_index = next(
+            index for index, (name, _) in enumerate(ordered_items) if name in HOSPITAL_CHECK_CHILD_FIELDS
+        )
+        if HOSPITAL_CHECK_GATE_FIELD not in field_info:
+            gate_field = {
+                '描述': '判断患者最近是否去医院做过相关检查；只有明确做过检查时，才继续询问后续化验和影像问题。',
+                '示例': '请问您最近有去医院进行检查吗？',
+                '依赖': {},
+                '追问上限': DEFAULT_MAX_ATTEMPTS.get(HOSPITAL_CHECK_GATE_FIELD, 2),
+            }
+            ordered_items.insert(first_child_index, (HOSPITAL_CHECK_GATE_FIELD, gate_field))
+
+        rebuilt = []
+        for name, info in ordered_items:
+            current = dict(info)
+            if name in HOSPITAL_CHECK_CHILD_FIELDS:
+                current['依赖'] = {'parent': HOSPITAL_CHECK_GATE_FIELD, 'condition': ['是']}
+            if name in FIELD_EXAMPLE_OVERRIDES:
+                current['示例'] = FIELD_EXAMPLE_OVERRIDES[name]
+            rebuilt.append((name, current))
+        field_info = dict(rebuilt)
 
     return field_info

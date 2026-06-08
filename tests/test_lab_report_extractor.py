@@ -9,14 +9,16 @@ import pandas as pd
 from extract_demo import run_extraction
 from lab_report_extractor import (
     DISPLAY_COLUMNS,
+    EXTRACTION_PROMPT,
     build_display_rows,
+    extract_followup_value_from_rows,
     export_rows_to_xlsx,
     extract_first_image_payload,
     extract_lab_items_from_file,
     normalize_extracted_items,
     parse_model_response,
 )
-from report_upload_flow import run_report_upload_flow
+from report_upload_flow import build_field_artifact_stem, run_report_upload_flow, save_report_file_only
 
 PATIENT_NAME = "\u674e\u540c\u5b66"
 
@@ -110,6 +112,119 @@ class DisplayProjectionTests(unittest.TestCase):
         )
 
 
+class FollowupValueExtractionTests(unittest.TestCase):
+    def test_extracts_creatinine_value_by_item_name(self):
+        rows = [
+            {
+                "item_name": "肌酐（酶法）",
+                "abbr": "CREA",
+                "result": "66",
+                "unit": "umol/L",
+                "reference_range": "41-81",
+            }
+        ]
+
+        value = extract_followup_value_from_rows("血生化：血清肌酐", rows)
+
+        self.assertEqual(value, "66")
+
+    def test_extracts_creatinine_value_when_item_name_has_prefix_and_abbr_is_cr(self):
+        rows = [
+            {
+                "item_name": "*肌酐（酶法）",
+                "abbr": "Cr",
+                "result": "117.8",
+                "unit": "umol/L",
+                "reference_range": "41.0-111.0",
+            }
+        ]
+
+        value = extract_followup_value_from_rows("血生化：血清肌酐", rows)
+
+        self.assertEqual(value, "117.8")
+
+    def test_extracts_creatinine_value_by_abbr_when_item_name_is_unstable(self):
+        rows = [
+            {
+                "item_name": "项目7",
+                "abbr": "CREA",
+                "result": "88",
+                "unit": "umol/L",
+                "reference_range": "41.0-111.0",
+            }
+        ]
+
+        value = extract_followup_value_from_rows("血生化：血清肌酐", rows)
+
+        self.assertEqual(value, "88")
+
+    def test_extracts_urine_summary_by_item_names(self):
+        rows = [
+            {
+                "item_name": "潜血",
+                "abbr": "BLD",
+                "result": "Trace-Lysed",
+                "unit": "",
+                "reference_range": "-",
+            },
+            {
+                "item_name": "蛋白质",
+                "abbr": "PRO",
+                "result": "Trace",
+                "unit": "g/L",
+                "reference_range": "-",
+            },
+        ]
+
+        value = extract_followup_value_from_rows("尿常规：尿蛋白、尿潜血", rows)
+
+        self.assertEqual(value, "尿潜血：Trace-Lysed；尿蛋白：Trace")
+
+    def test_extracts_urine_summary_by_abbr_when_item_names_are_unstable(self):
+        rows = [
+            {
+                "item_name": "项目15",
+                "abbr": "BLD",
+                "result": "Trace-Lysed",
+                "unit": "",
+                "reference_range": "-",
+            },
+            {
+                "item_name": "项目16",
+                "abbr": "PRO",
+                "result": "Trace",
+                "unit": "g/L",
+                "reference_range": "-",
+            },
+        ]
+
+        value = extract_followup_value_from_rows("尿常规：尿蛋白、尿潜血", rows)
+
+        self.assertEqual(value, "尿潜血：Trace-Lysed；尿蛋白：Trace")
+
+    def test_extracts_urine_summary_by_common_item_aliases(self):
+        rows = [
+            {
+                "item_name": "尿潜血",
+                "abbr": "BLD",
+                "result": "阴性",
+                "unit": "",
+                "reference_range": "-",
+            },
+            {
+                "item_name": "蛋白",
+                "abbr": "PRO",
+                "result": "Trace",
+                "unit": "g/L",
+                "reference_range": "-",
+            },
+        ]
+
+        value = extract_followup_value_from_rows("尿常规：尿蛋白、尿潜血", rows)
+
+        self.assertEqual(value, "尿潜血：阴性；尿蛋白：Trace")
+
+
 class ExportRowsToXlsxTests(unittest.TestCase):
     def test_export_writes_projected_columns(self):
         rows = [
@@ -194,6 +309,14 @@ class ParseModelResponseTests(unittest.TestCase):
         )
 
 
+class PromptContractTests(unittest.TestCase):
+    def test_extraction_prompt_requires_full_image_and_lower_half_rows(self):
+        self.assertIn("entire image", EXTRACTION_PROMPT)
+        self.assertIn("top to bottom", EXTRACTION_PROMPT)
+        self.assertIn("do not stop after the first section", EXTRACTION_PROMPT)
+        self.assertIn("lower half of the image", EXTRACTION_PROMPT)
+
+
 class ExtractionFlowTests(unittest.TestCase):
     def test_extract_lab_items_retries_when_result_matches_abbreviation(self):
         first_pass = """{"items":[{"item_name":"ALP","abbr":"ALP","result":"ALP","unit":"U/L","reference_range":"50-135"}]}"""
@@ -222,6 +345,33 @@ class ExtractionFlowTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["result"], "42.1")
         self.assertEqual(len(client.calls), 2)
+
+    def test_extract_lab_items_merges_bottom_crop_when_urine_chemistry_is_missing(self):
+        full_pass = """{"items":[
+            {"item_name":"红细胞","abbr":"RBC","result":"7","unit":"/uL","reference_range":"0-17"},
+            {"item_name":"白细胞","abbr":"WBC","result":"4","unit":"/uL","reference_range":"0-28"},
+            {"item_name":"粘液丝","abbr":"MUCS","result":"24","unit":"/uL","reference_range":"0-28"}
+        ]}"""
+        bottom_pass = """{"items":[
+            {"item_name":"潜血","abbr":"BLD","result":"Trace-Lysed","unit":"","reference_range":"-"},
+            {"item_name":"蛋白质","abbr":"PRO","result":"Trace","unit":"g/L","reference_range":"-"},
+            {"item_name":"比重","abbr":"SG","result":"1.023","unit":"","reference_range":"1.003-1.030"}
+        ]}"""
+        client = FakeClient([full_pass, bottom_pass])
+
+        with patch(
+            "lab_report_extractor.extract_first_image_payload",
+            return_value="data:image/png;base64,full",
+        ), patch(
+            "lab_report_extractor.extract_bottom_crop_payload",
+            return_value="data:image/png;base64,bottom",
+        ):
+            rows = extract_lab_items_from_file("fake.png", client=client)
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("BLD", {row["abbr"] for row in rows})
+        self.assertIn("PRO", {row["abbr"] for row in rows})
+        self.assertEqual(client.calls[1]["messages"][0]["content"][1]["image_url"]["url"], "data:image/png;base64,bottom")
 
 
 class ExtractDemoTests(unittest.TestCase):
@@ -260,6 +410,10 @@ class ExtractDemoTests(unittest.TestCase):
 
 
 class ExtractDemoOutputPersistenceTests(unittest.TestCase):
+    def test_build_field_artifact_stem_normalizes_followup_field_name(self):
+        self.assertEqual(build_field_artifact_stem("血生化：血清肌酐"), "血生化_血清肌酐")
+        self.assertEqual(build_field_artifact_stem("尿常规：尿蛋白、尿潜血"), "尿常规_尿蛋白_尿潜血")
+
     def test_run_report_upload_flow_saves_excel_and_original_file_in_patient_folder(self):
         full_rows = [
             {
@@ -283,14 +437,16 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
                     source_path,
                     output_dir=output_dir,
                     patient_name=patient_name,
+                    field_name="血生化：血清肌酐",
                 )
 
             self.assertTrue(os.path.exists(output_path))
             submission_dir = os.path.dirname(output_path)
-            copied_input_path = os.path.join(submission_dir, "input.jpg")
+            copied_input_path = os.path.join(submission_dir, "血生化_血清肌酐.jpg")
             self.assertTrue(os.path.isdir(submission_dir))
             self.assertEqual(submission_dir, os.path.join(output_dir, patient_name))
             self.assertTrue(os.path.exists(copied_input_path))
+            self.assertEqual(os.path.basename(output_path), "血生化_血清肌酐_提取结果.xlsx")
             with open(copied_input_path, "rb") as handle:
                 self.assertEqual(handle.read(), b"fake-image")
 
@@ -363,6 +519,26 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
                 )
 
         self.assertEqual(os.path.dirname(output_path), patient_output_dir)
+
+    def test_save_report_file_only_copies_original_file_without_generating_excel(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = os.path.join(temp_dir, "outputs")
+            source_path = os.path.join(temp_dir, "ultrasound.jpg")
+            with open(source_path, "wb") as handle:
+                handle.write(b"kidney-ultrasound")
+
+            status, saved_path = save_report_file_only(
+                source_path,
+                output_dir=output_dir,
+                patient_name=PATIENT_NAME,
+                field_name="肾脏彩超",
+            )
+
+            self.assertEqual(status, "上传完成")
+            self.assertTrue(os.path.exists(saved_path))
+            self.assertEqual(os.path.dirname(saved_path), os.path.join(output_dir, PATIENT_NAME))
+            self.assertEqual(os.path.basename(saved_path), "肾脏彩超.jpg")
+            self.assertFalse(os.path.exists(os.path.join(output_dir, PATIENT_NAME, "lab_extract_result.xlsx")))
 
 
 if __name__ == "__main__":

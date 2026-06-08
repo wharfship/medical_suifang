@@ -8,6 +8,7 @@ YES_NO_FIELDS = {
     "当前有无高血压",
     "是否曾患冠心病",
     "是否曾患脑血管病",
+    "请问您最近有去医院进行检查吗？",
     "近一年是否存在手术切口疼痛",
     "（若有高血压）是否为过去一年新发",
     "（若有糖尿病）是否为过去一年新发",
@@ -36,14 +37,17 @@ DURATION_FIELDS = {
 }
 PAIN_SCORE_FIELDS = {"（若存在手术切口疼痛）疼痛程度评分"}
 TEXT_COMPLETE_FIELDS = {
+    "其余病史及用药情况",
+    "尿常规：尿蛋白、尿潜血",
+    "肾脏彩超",
+}
+
+STRICT_COMPLEX_FIELDS = {
     "（若有高血压）药物控制方案",
     "（若有糖尿病）药物控制方案",
     "（若曾患冠心病）治疗方式",
     "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症",
-    "其余病史及用药情况",
     "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果",
-    "尿常规：尿蛋白、尿潜血",
-    "肾脏彩超",
 }
 
 FIELD_RULES = {
@@ -121,6 +125,12 @@ FIELD_RULES = {
 
 GENERIC_SHORT_ANSWERS = {"有", "没有", "不知道", "不清楚", "忘了", "记不清", "记不太清"}
 NEGATIVE_WORDS = {"无", "没有", "否", "未", "不疼", "没事", "正常", "阴性"}
+UNKNOWN_PATTERN = re.compile(r"(不知道|不清楚|记不清|忘了|不确定|说不准)")
+POSITIVE_MEDICATION_PATTERN = re.compile(r"(药|片|粒|胰岛素|注射|口服|服用|吃)")
+NEGATIVE_MEDICATION_PATTERN = re.compile(r"(没吃药|未用药|没有用药|没用药)")
+INSULIN_PATTERN = re.compile(r"(胰岛素)")
+SURGERY_PATTERN = re.compile(r"(手术|支架|搭桥|介入|开刀)")
+NEGATIVE_SURGERY_PATTERN = re.compile(r"(没做手术|未手术)")
 
 
 def _clean_text(value):
@@ -251,6 +261,338 @@ def _is_specific_text(value):
     return len(text) >= 2
 
 
+def _contains_unknown(text):
+    return bool(UNKNOWN_PATTERN.search(_clean_text(text)))
+
+
+def _slot_status_from_patterns(text, patterns, slot_keywords=None):
+    clean = _clean_text(text)
+    for pattern in patterns:
+        if re.search(pattern, clean):
+            return "answered"
+    if slot_keywords:
+        for keyword in slot_keywords:
+            if re.search(rf"({keyword}).{{0,6}}(不知道|不清楚|记不清|忘了)", clean):
+                return "unknown"
+            if re.search(rf"(不知道|不清楚|记不清|忘了).{{0,6}}({keyword})", clean):
+                return "unknown"
+    elif _contains_unknown(clean):
+        return "unknown"
+    return "missing"
+
+
+def _mentions_no_medication(text):
+    return bool(NEGATIVE_MEDICATION_PATTERN.search(_clean_text(text)))
+
+
+def _mentions_medication(text):
+    clean = _clean_text(text)
+    return bool(POSITIVE_MEDICATION_PATTERN.search(clean)) and not _mentions_no_medication(clean)
+
+
+def _mentions_insulin(text):
+    return bool(INSULIN_PATTERN.search(_clean_text(text)))
+
+
+def _mentions_surgery(text):
+    clean = _clean_text(text)
+    return bool(SURGERY_PATTERN.search(clean)) and not bool(NEGATIVE_SURGERY_PATTERN.search(clean))
+
+
+def _mark_not_applicable(slots, names):
+    for name in names:
+        slots[name] = "not_applicable"
+
+
+def _has_status(slots, status):
+    return any(value == status for value in slots.values())
+
+
+def _evaluate_hypertension_medication_slots(text):
+    slots = {
+        "control_level": _slot_status_from_patterns(text, [r"\d+\s*/\s*\d+", r"血压"], ["血压"]),
+    }
+    if _mentions_medication(text):
+        slots.update({
+            "drug_name": _slot_status_from_patterns(text, [r"(硝苯地平|氨氯地平|缬沙坦|厄贝沙坦|替米沙坦|降压药)"], ["药", "药物"]),
+            "spec": _slot_status_from_patterns(text, [r"\d+\s*(mg|毫克|g|克)"], ["规格", "mg", "毫克"]),
+            "frequency": _slot_status_from_patterns(text, [r"(一天|每日|每天).{0,6}(次|回)"], ["次数", "频次", "一天", "每天"]),
+            "dose_each_time": _slot_status_from_patterns(text, [r"(一次|每次).{0,8}(片|粒|颗)"], ["一次", "每次", "几片", "几粒"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    return slots
+
+
+def _evaluate_diabetes_medication_slots(text):
+    slots = {
+        "control_level": _slot_status_from_patterns(text, [r"(血糖|空腹血糖|\d+(?:\.\d+)?)"], ["血糖", "空腹血糖"]),
+    }
+    if _mentions_medication(text):
+        slots.update({
+            "drug_name": _slot_status_from_patterns(text, [r"(二甲双胍|阿卡波糖|达格列净|降糖药)"], ["药", "药物"]),
+            "spec": _slot_status_from_patterns(text, [r"\d+\s*(mg|毫克|g|克)"], ["规格", "mg", "毫克"]),
+            "frequency": _slot_status_from_patterns(text, [r"(一天|每日|每天).{0,6}(次|回)"], ["次数", "频次", "一天", "每天"]),
+            "dose_each_time": _slot_status_from_patterns(text, [r"(一次|每次).{0,8}(片|粒|颗)"], ["一次", "每次", "几片", "几粒"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+
+    if _mentions_insulin(text):
+        slots.update({
+            "insulin_name": _slot_status_from_patterns(text, [r"(甘精胰岛素|门冬胰岛素|胰岛素)"], ["胰岛素"]),
+            "injection_time": _slot_status_from_patterns(text, [r"(早上|中午|晚上|饭前|饭后|睡前)"], ["时间", "什么时候", "早上", "晚上"]),
+            "injection_units": _slot_status_from_patterns(text, [r"\d+\s*(个单位|u|U)"], ["单位"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"insulin_name", "injection_time", "injection_units"})
+    return slots
+
+
+def _evaluate_coronary_treatment_slots(text):
+    slots = {
+        "treatment_type": _slot_status_from_patterns(text, [r"(手术|支架|搭桥|介入|药物|吃药|观察)"]),
+        "stenosis": _slot_status_from_patterns(text, [r"(冠脉).{0,6}(狭窄|存在|没有)"]),
+        "symptom_improved": _slot_status_from_patterns(text, [r"(好转|好多了|缓解|仍然|改善)"]),
+        "recurred": _slot_status_from_patterns(text, [r"(再犯|再发|没再犯|没有再犯)"]),
+    }
+    if slots["treatment_type"] == "missing" and (_mentions_surgery(text) or _mentions_medication(text)):
+        slots["treatment_type"] = "answered"
+    if _mentions_surgery(text):
+        slots.update({
+            "surgery_time": _slot_status_from_patterns(text, [r"(19|20)\d{2}年|\d+年|\d+月"]),
+            "surgery_type": _slot_status_from_patterns(text, [r"(支架|搭桥|介入|手术)"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"surgery_time", "surgery_type"})
+
+    if _mentions_medication(text):
+        slots.update({
+            "drug_name": _slot_status_from_patterns(text, [r"(阿司匹林|氯吡格雷|阿托伐他汀|心脏药|降压药)"]),
+            "spec": _slot_status_from_patterns(text, [r"\d+\s*(mg|毫克|g|克)"]),
+            "frequency": _slot_status_from_patterns(text, [r"(一天|每日|每天).{0,6}(次|回)"]),
+            "dose_each_time": _slot_status_from_patterns(text, [r"(一次|每次).{0,8}(片|粒|颗)"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    return slots
+
+
+def _evaluate_cerebrovascular_treatment_slots(text):
+    slots = {
+        "disease_name": _slot_status_from_patterns(text, [r"(脑梗|脑出血|脑血管病)"]),
+        "treatment_type": _slot_status_from_patterns(text, [r"(手术|介入|药物|吃药|观察|保守治疗)"]),
+        "symptom_improved": _slot_status_from_patterns(text, [r"(好转|好多了|缓解|仍然|改善)"]),
+        "recurred": _slot_status_from_patterns(text, [r"(再犯|再发|没再犯|没有再犯)"]),
+        "sequelae": _slot_status_from_patterns(text, [r"(后遗症|没有后遗症|遗留)"]),
+    }
+    if slots["treatment_type"] == "missing" and (_mentions_surgery(text) or _mentions_medication(text)):
+        slots["treatment_type"] = "answered"
+    if _mentions_surgery(text):
+        slots.update({
+            "surgery_time": _slot_status_from_patterns(text, [r"(19|20)\d{2}年|\d+年|\d+月"]),
+            "surgery_type": _slot_status_from_patterns(text, [r"(开刀|介入|手术)"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"surgery_time", "surgery_type"})
+
+    if _mentions_medication(text):
+        slots.update({
+            "drug_name": _slot_status_from_patterns(text, [r"(阿司匹林|氯吡格雷|他汀药|脑血管药|降压药)"]),
+            "spec": _slot_status_from_patterns(text, [r"\d+\s*(mg|毫克|g|克)"]),
+            "frequency": _slot_status_from_patterns(text, [r"(一天|每日|每天).{0,6}(次|回)"]),
+            "dose_each_time": _slot_status_from_patterns(text, [r"(一次|每次).{0,8}(片|粒|颗)"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    return slots
+
+
+def _evaluate_other_history_treatment_slots(text):
+    slots = {
+        "disease_name": _slot_status_from_patterns(text, [r"(甲减|腰间盘突出|疾病|病史|病)"]),
+        "treatment_type": _slot_status_from_patterns(text, [r"(手术|介入|药物|吃药|观察|保守治疗)"]),
+        "symptom_improved": _slot_status_from_patterns(text, [r"(好转|好多了|缓解|仍然|改善|控制)"]),
+        "recurred": _slot_status_from_patterns(text, [r"(再犯|再发|没再犯|没有再犯)"]),
+    }
+    if slots["treatment_type"] == "missing" and (_mentions_surgery(text) or _mentions_medication(text)):
+        slots["treatment_type"] = "answered"
+    if _mentions_surgery(text):
+        slots.update({
+            "surgery_time": _slot_status_from_patterns(text, [r"(19|20)\d{2}年|\d+年|\d+月"]),
+            "surgery_type": _slot_status_from_patterns(text, [r"(手术|切除|介入)"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"surgery_time", "surgery_type"})
+
+    if _mentions_medication(text):
+        slots.update({
+            "drug_name": _slot_status_from_patterns(text, [r"(优甲乐|止痛药|降压药|降糖药|药)"]),
+            "spec": _slot_status_from_patterns(text, [r"\d+\s*(mg|毫克|g|克|ug)"]),
+            "frequency": _slot_status_from_patterns(text, [r"(一天|每日|每天).{0,6}(次|回)"]),
+            "dose_each_time": _slot_status_from_patterns(text, [r"(一次|每次).{0,8}(片|粒|颗)"]),
+        })
+    else:
+        _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    return slots
+
+
+def _finalize_strict_complex_result(result, slots, note):
+    adjusted = dict(result)
+    if _has_status(slots, "missing"):
+        adjusted["status"] = "ask_again"
+        adjusted["completion"] = "partial" if _clean_text(adjusted.get("field_value")) else "empty"
+    else:
+        adjusted["status"] = "done"
+        adjusted["completion"] = "complete"
+    return _append_reason(adjusted, note)
+
+
+def _get_strict_complex_slots(field, value):
+    if field == "（若有高血压）药物控制方案":
+        return _evaluate_hypertension_medication_slots(value)
+    if field == "（若有糖尿病）药物控制方案":
+        return _evaluate_diabetes_medication_slots(value)
+    if field == "（若曾患冠心病）治疗方式":
+        return _evaluate_coronary_treatment_slots(value)
+    if field == "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症":
+        return _evaluate_cerebrovascular_treatment_slots(value)
+    if field == "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果":
+        return _evaluate_other_history_treatment_slots(value)
+    return {}
+
+
+def build_missing_slots_payload(field, value):
+    if field not in STRICT_COMPLEX_FIELDS:
+        return {}
+
+    label_map = {
+        "control_level": "控制水平",
+        "drug_name": "药物名称",
+        "spec": "规格",
+        "frequency": "频次",
+        "dose_each_time": "单次剂量",
+        "insulin_name": "胰岛素名称",
+        "injection_time": "注射时间",
+        "injection_units": "注射单位数",
+        "treatment_type": "治疗方式",
+        "stenosis": "是否仍有狭窄",
+        "symptom_improved": "症状是否好转",
+        "recurred": "是否再患",
+        "disease_name": "疾病名称",
+        "sequelae": "是否有后遗症",
+        "surgery_time": "手术时间",
+        "surgery_type": "手术术式",
+    }
+    slots = _get_strict_complex_slots(field, value)
+    payload = {
+        "field": field,
+        "answered": [],
+        "unknown": [],
+        "missing": [],
+    }
+    for key, slot_status in slots.items():
+        if slot_status == "not_applicable":
+            continue
+        label = label_map.get(key, key)
+        if slot_status in payload:
+            payload[slot_status].append(label)
+    return payload
+
+
+def build_missing_slots_hint(field, value):
+    payload = build_missing_slots_payload(field, value)
+    if not payload:
+        return ""
+    ordered = []
+    ordered.extend(f"{label}=有" for label in payload["answered"])
+    ordered.extend(f"{label}=不知道" for label in payload["unknown"])
+    ordered.extend(f"{label}=缺" for label in payload["missing"])
+
+    summary = "当前已知：" + "，".join(ordered) if ordered else "当前已知：无"
+    missing_summary = "仍需追问：" + "、".join(payload["missing"]) if payload["missing"] else "仍需追问：无"
+    unknown_summary = (
+        "已明确不知道：" + "、".join(payload["unknown"]) if payload["unknown"] else "已明确不知道：无"
+    )
+    return (
+        f"{summary}。{missing_summary}。{unknown_summary}。"
+        "请优先追问仍然缺失的槽位，不要重复追问已经明确不知道的槽位。"
+    )
+
+
+def get_strict_followup_target(field, value):
+    if field not in STRICT_COMPLEX_FIELDS:
+        return None
+
+    slots = _get_strict_complex_slots(field, value)
+    sequence_map = {
+        "（若有高血压）药物控制方案": [
+            "drug_name",
+            "medication_detail",
+            "control_level",
+        ],
+        "（若有糖尿病）药物控制方案": [
+            "drug_name",
+            "medication_detail",
+            "insulin_name",
+            "injection_time",
+            "injection_units",
+            "control_level",
+        ],
+        "（若曾患冠心病）治疗方式": [
+            "treatment_type",
+            "surgery_time",
+            "surgery_type",
+            "drug_name",
+            "medication_detail",
+            "stenosis",
+            "symptom_improved",
+            "recurred",
+        ],
+        "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症": [
+            "disease_name",
+            "treatment_type",
+            "surgery_time",
+            "surgery_type",
+            "drug_name",
+            "medication_detail",
+            "symptom_improved",
+            "recurred",
+            "sequelae",
+        ],
+        "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果": [
+            "disease_name",
+            "treatment_type",
+            "surgery_time",
+            "surgery_type",
+            "drug_name",
+            "medication_detail",
+            "symptom_improved",
+            "recurred",
+        ],
+    }
+    medication_detail_slots = ("spec", "frequency", "dose_each_time")
+
+    for item in sequence_map[field]:
+        if item == "medication_detail":
+            missing_detail = [
+                slot_name
+                for slot_name in medication_detail_slots
+                if slots.get(slot_name) == "missing"
+            ]
+            if slots.get("drug_name") == "answered" and missing_detail:
+                return {
+                    "kind": "group",
+                    "group": "medication_detail",
+                    "missing_slots": missing_detail,
+                }
+            continue
+
+        if slots.get(item) == "missing":
+            return {"kind": "slot", "slot": item}
+    return None
+
+
 def get_field_rule(field):
     return FIELD_RULES.get(field, {})
 
@@ -342,6 +684,19 @@ def apply_field_completion_rules(field, result):
             adjusted["completion"] = "complete"
             return _append_reason(adjusted, "按疼痛评分字段规则收束。")
         return adjusted
+
+    if field in STRICT_COMPLEX_FIELDS:
+        if field == "（若有高血压）药物控制方案":
+            slots = _evaluate_hypertension_medication_slots(value)
+        elif field == "（若有糖尿病）药物控制方案":
+            slots = _evaluate_diabetes_medication_slots(value)
+        elif field == "（若曾患冠心病）治疗方式":
+            slots = _evaluate_coronary_treatment_slots(value)
+        elif field == "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症":
+            slots = _evaluate_cerebrovascular_treatment_slots(value)
+        else:
+            slots = _evaluate_other_history_treatment_slots(value)
+        return _finalize_strict_complex_result(adjusted, slots, "按复杂字段槽位规则校正。")
 
     if field in TEXT_COMPLETE_FIELDS:
         normalized = _normalize_yes_no(value) if field == "其余病史及用药情况" else value

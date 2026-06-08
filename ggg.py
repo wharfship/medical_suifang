@@ -8,9 +8,15 @@ import time
 from pathlib import Path
 
 from excel_adjusting import *
-from field_rules import apply_field_completion_rules
+from field_rules import (
+    apply_field_completion_rules,
+    build_missing_slots_hint,
+    get_strict_followup_target,
+    STRICT_COMPLEX_FIELDS,
+)
+from lab_report_extractor import extract_followup_value_from_rows
 from medical_output_flow import DEFAULT_PATIENT_NAME, persist_followup_export
-from report_upload_flow import run_report_upload_flow
+from report_upload_flow import run_report_upload_flow_with_rows, save_report_file_only
 from workflow_status import (
     finalize_after_attempt_limit,
     get_field_attempt_limit,
@@ -18,7 +24,7 @@ from workflow_status import (
     normalize_parse_result,
 )
 
-FILE_NAME = "最后几个问题.xls"
+FILE_NAME = "复杂问题.xls"
 BASE_DIR = Path(__file__).resolve().parent
 excel_path = BASE_DIR / FILE_NAME
 if not excel_path.exists():
@@ -35,6 +41,15 @@ ALLOWED_REPORT_FILE_TYPES = [".docx", ".png", ".jpg", ".jpeg"]
 UPLOAD_TRIGGER_KEYWORDS = ("化验", "检查", "血生化", "肌酐", "尿常规", "肾脏", "报告")
 UPLOAD_REVEAL_REMAINING_FIELDS = 6
 UPLOAD_REVEAL_PROGRESS = 0.72
+TARGETED_UPLOAD_FIELDS = {
+    "随访时受者状态",
+    "血生化：血清肌酐",
+    "尿常规：尿蛋白、尿潜血",
+    "肾脏彩超",
+}
+DEFAULT_INPUT_PLACEHOLDER = "请直接输入您的回答，如不清楚也可以说“不知道”"
+TARGETED_UPLOAD_PLACEHOLDER = "这题可以直接说，也可以上传化验单照片"
+KIDNEY_ULTRASOUND_FIELD = "肾脏彩超"
 
 CUSTOM_CSS = """
 :root {
@@ -583,6 +598,23 @@ def should_reveal_upload_panel(current_field):
 
 
 def build_upload_stage_note(current_field):
+    field_text = str(current_field or "")
+    if current_field == KIDNEY_ULTRASOUND_FIELD:
+        return (
+            "<div class='upload-stage-note'>"
+            "<strong>这题可上传肾脏彩超图片辅助填写</strong>"
+            f"当前问题：{html.escape(field_text)}。如果手头有肾脏彩超图片，可以直接上传，系统会为您保存到当前患者目录。"
+            "</div>"
+        )
+
+    if current_field in TARGETED_UPLOAD_FIELDS:
+        return (
+            "<div class='upload-stage-note'>"
+            "<strong>这题可上传化验单辅助填写</strong>"
+            f"当前问题：{html.escape(field_text)}。如果手头有化验单，可以直接上传照片或文档辅助填写当前题。"
+            "</div>"
+        )
+
     return (
         "<div class='upload-stage-note'>"
         "<strong>现在可以上传化验单</strong>"
@@ -591,21 +623,32 @@ def build_upload_stage_note(current_field):
     )
 
 
+def get_input_placeholder(current_field):
+    if current_field == KIDNEY_ULTRASOUND_FIELD:
+        return "这题可以直接说，也可以上传肾脏彩超图片"
+    if current_field in TARGETED_UPLOAD_FIELDS:
+        return TARGETED_UPLOAD_PLACEHOLDER
+    return DEFAULT_INPUT_PLACEHOLDER
+
+
 def build_upload_component_updates(current_field, clear_values=False):
     show_upload_panel = should_reveal_upload_panel(current_field)
+    placeholder_update = gr.update(placeholder=get_input_placeholder(current_field))
     if clear_values:
         return (
             gr.update(value=build_upload_stage_note(current_field), visible=show_upload_panel),
             gr.update(visible=show_upload_panel, value=None),
             gr.update(visible=show_upload_panel, value=""),
             gr.update(visible=show_upload_panel, value=""),
+            placeholder_update,
         )
 
     return (
         gr.update(value=build_upload_stage_note(current_field), visible=show_upload_panel),
-        gr.update(visible=show_upload_panel),
-        gr.update(visible=show_upload_panel),
-        gr.update(visible=show_upload_panel),
+        gr.update(visible=show_upload_panel, value=None),
+        gr.update(visible=show_upload_panel, value=""),
+        gr.update(visible=show_upload_panel, value=""),
+        placeholder_update,
     )
 
 
@@ -698,28 +741,86 @@ def clone_chat_history(history):
     return [dict(item) if isinstance(item, dict) else item for item in (history or [])]
 
 
-def save_uploaded_report(uploaded_file):
+def merge_strict_followup_value(field, previous_value, current_value):
+    if field not in STRICT_COMPLEX_FIELDS:
+        return current_value
+
+    parts = [str(previous_value or "").strip(), str(current_value or "").strip()]
+    merged_parts = []
+    for part in parts:
+        if part and part not in merged_parts:
+            merged_parts.append(part)
+    return "，".join(merged_parts)
+
+
+def save_uploaded_report(uploaded_file, current_field=None):
     global last_report_output_path
     if not uploaded_file:
         last_report_output_path = ""
-        return "未上传化验单。", "", None
+        return "未上传化验单。", "", None, gr.update(value=None), []
 
     uploaded_path = Path(uploaded_file)
     suffix = uploaded_path.suffix.lower()
     if suffix not in ALLOWED_REPORT_SUFFIXES:
         allowed_text = "、".join(sorted(ALLOWED_REPORT_SUFFIXES))
         last_report_output_path = ""
-        return f"仅支持以下格式的化验单: {allowed_text}", "", None
+        return f"仅支持以下格式的化验单: {allowed_text}", "", None, gr.update(value=None), []
 
-    status, output_path = run_report_upload_flow(
+    if current_field == KIDNEY_ULTRASOUND_FIELD:
+        status, saved_path = save_report_file_only(
+            str(uploaded_path),
+            patient_name=PATIENT_NAME,
+            field_name=current_field,
+        )
+        last_report_output_path = ""
+        if saved_path:
+            status = f"{status}，已用于当前题：{current_field}"
+        return status, saved_path or "", None, gr.update(value=None), []
+
+    status, output_path, rows = run_report_upload_flow_with_rows(
         str(uploaded_path),
         patient_name=PATIENT_NAME,
+        field_name=current_field,
     )
     last_report_output_path = output_path or ""
-    return status, output_path or "", output_path or None
+    if current_field and output_path:
+        status = f"{status}，已用于当前题：{current_field}"
+    return status, output_path or "", output_path or None, gr.update(value=None), rows
 
 
-def advance_after_report_upload(current_chat_history):
+def build_upload_result(field, extracted_rows=None):
+    if field == KIDNEY_ULTRASOUND_FIELD:
+        return {
+            "status": "done",
+            "completion": "complete",
+            "field_value": "已上传肾脏彩超",
+            "confidence": 1.0,
+            "reasoning": "用户已上传肾脏彩超图片，系统已保存原文件。",
+            "evidence": "patient: 已上传肾脏彩超图片。",
+        }
+
+    extracted_value = extract_followup_value_from_rows(field, extracted_rows or [])
+    if extracted_value:
+        return {
+            "status": "done",
+            "completion": "complete",
+            "field_value": extracted_value,
+            "confidence": 1.0,
+            "reasoning": "已根据上传化验单中的对应项目自动提取当前字段结果。",
+            "evidence": f"patient: 已上传化验单。 extracted: {extracted_value}",
+        }
+
+    return {
+        "status": "done",
+        "completion": "complete",
+        "field_value": "已上传化验单",
+        "confidence": 1.0,
+        "reasoning": "用户已通过上传控件补充化验单。",
+        "evidence": "patient: 已上传化验单。",
+    }
+
+
+def advance_after_report_upload(current_chat_history, extracted_rows=None):
     global tracker
     updated_chat_history = clone_chat_history(current_chat_history)
     field = tracker.get_next_field()
@@ -728,14 +829,7 @@ def advance_after_report_upload(current_chat_history):
         df, file_path = export_tracker_data()
         return updated_chat_history, field, build_progress_html(), "化验单已上传。", file_path, df
 
-    upload_result = {
-        "status": "done",
-        "completion": "complete",
-        "field_value": "已上传化验单",
-        "confidence": 1.0,
-        "reasoning": "用户已通过上传控件补充化验单。",
-        "evidence": "patient: 已上传化验单。",
-    }
+    upload_result = build_upload_result(field, extracted_rows)
     tracker.update_field(field, upload_result)
     field_attempts.pop(field, None)
     add_assistant_message(build_confirmation_message(field, upload_result), updated_chat_history)
@@ -744,7 +838,10 @@ def advance_after_report_upload(current_chat_history):
     next_field = maybe_finalize_bmi(updated_chat_history)
     df, file_path = export_tracker_data()
 
-    parse_text = f"流程状态: done, 完整度: complete, 置信度: 1.0\n解释: 已将当前问题标记为已上传化验单。"
+    parse_text = (
+        "流程状态: done, 完整度: complete, 置信度: 1.0\n"
+        f"解释: 已将当前问题更新为 {upload_result['field_value']}。"
+    )
     if next_field is None:
         completion_msg = "所有信息已收集完成，请点击“导出结果”按钮下载随访结果。"
         add_assistant_message(completion_msg, updated_chat_history)
@@ -754,6 +851,52 @@ def advance_after_report_upload(current_chat_history):
     question = generate_question(next_field, metadata, history_text)
     add_assistant_message(question, updated_chat_history)
     return updated_chat_history, next_field, build_progress_html(), parse_text, file_path, df
+
+
+def handle_report_upload(uploaded_file, current_chat_history):
+    current_field = tracker.get_next_field()
+    status_text, saved_path, download_path, upload_reset, rows = save_uploaded_report(
+        uploaded_file,
+        current_field=current_field,
+    )
+
+    if not saved_path:
+        df, file_path = export_tracker_data()
+        upload_note, _, _, _, _ = build_upload_component_updates(current_field, clear_values=True)
+        return (
+            clone_chat_history(current_chat_history),
+            current_field,
+            build_progress_html(),
+            status_text,
+            file_path,
+            df,
+            upload_note,
+            upload_reset,
+            status_text,
+            "",
+            download_path,
+            gr.update(placeholder=get_input_placeholder(current_field)),
+        )
+
+    updated_chat_history, next_field, progress_text, parse_text, file_path, df = advance_after_report_upload(
+        current_chat_history,
+        rows,
+    )
+    upload_note, _, _, _, _ = build_upload_component_updates(next_field, clear_values=True)
+    return (
+        updated_chat_history,
+        next_field,
+        progress_text,
+        parse_text,
+        file_path,
+        df,
+        upload_note,
+        upload_reset,
+        status_text,
+        saved_path,
+        download_path,
+        gr.update(placeholder=get_input_placeholder(next_field)),
+    )
 
 
 def stream_assistant_messages(
@@ -766,7 +909,8 @@ def stream_assistant_messages(
     df,
 ):
     display_history = clone_chat_history(base_history)
-    upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(current_field)
+    upload_note, upload_file_update, upload_status_update, upload_path_update, _ = build_upload_component_updates(current_field)
+    current_placeholder = get_input_placeholder(current_field)
     for message in new_messages:
         role = message.get("role")
         if role != "assistant":
@@ -780,7 +924,7 @@ def stream_assistant_messages(
         for index in range(chunk_size, len(full_text) + chunk_size, chunk_size):
             assistant_message["content"] = full_text[:index]
             yield (
-                gr.update(value="", interactive=False),
+                gr.update(value="", interactive=False, placeholder=current_placeholder),
                 clone_chat_history(display_history),
                 current_field,
                 progress_text,
@@ -797,7 +941,7 @@ def stream_assistant_messages(
         assistant_message["content"] = full_text
 
     yield (
-        gr.update(value="", interactive=True),
+        gr.update(value="", interactive=True, placeholder=current_placeholder),
         clone_chat_history(display_history),
         current_field,
         progress_text,
@@ -833,12 +977,38 @@ def init_system():
         question = generate_question(field, metadata, history_text)
     except Exception as exc:
         add_assistant_message(build_runtime_error_message(exc), chat_history)
-        upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(field, clear_values=True)
-        return "初始化系统失败", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update, gr.update()
+        upload_note, upload_file_update, upload_status_update, upload_path_update, _ = build_upload_component_updates(field, clear_values=True)
+        return (
+            "初始化系统失败",
+            chat_history,
+            field,
+            build_progress_html(),
+            file_path,
+            pd.DataFrame(),
+            upload_note,
+            upload_file_update,
+            upload_status_update,
+            upload_path_update,
+            gr.update(value=None),
+            gr.update(placeholder=get_input_placeholder(field)),
+        )
 
     add_assistant_message(question, chat_history)
-    upload_note, upload_file_update, upload_status_update, upload_path_update = build_upload_component_updates(field, clear_values=True)
-    return "初始化系统成功", chat_history, field, build_progress_html(), file_path, pd.DataFrame(), upload_note, upload_file_update, upload_status_update, upload_path_update, gr.update()
+    upload_note, upload_file_update, upload_status_update, upload_path_update, _ = build_upload_component_updates(field, clear_values=True)
+    return (
+        "初始化系统成功",
+        chat_history,
+        field,
+        build_progress_html(),
+        file_path,
+        pd.DataFrame(),
+        upload_note,
+        upload_file_update,
+        upload_status_update,
+        upload_path_update,
+        gr.update(value=None),
+        gr.update(placeholder=get_input_placeholder(field)),
+    )
 
 
 def process_user_input(user_message, chat_history):
@@ -860,11 +1030,16 @@ def process_user_input(user_message, chat_history):
         df, file_path = export_tracker_data()
         return "", chat_history, field, build_progress_html(), error_message, file_path, df
     # 先把模型输出归一化，再用字段规则做一次“填表口径”校正。
+    raw_result["field"] = field
     result = normalize_parse_result(raw_result)
+    previous_value = tracker.get_field_value(field)
+    merged_value = merge_strict_followup_value(field, previous_value, result.get("field_value", ""))
+    if merged_value != result.get("field_value", ""):
+        result["field_value"] = merged_value
     result = apply_field_completion_rules(field, result)
     end_parse = time.time()
 
-    print(f"🔍 解析 parse_answer() 耗时：{end_parse - start_parse:.2f} 秒")
+    print(f"解析 parse_answer() 耗时：{end_parse - start_parse:.2f} 秒")
     print(f"AI提取的数据原始依据: {result['evidence']}")
 
     attempt_limit = get_field_attempt_limit(metadata, field)
@@ -874,6 +1049,8 @@ def process_user_input(user_message, chat_history):
     )
 
     status_for_question = None
+    followup_target = None
+    missing_slots_hint = ""
     field_finished = is_final_status(result["status"])
 
     if result["status"] == "ask_again":
@@ -889,6 +1066,8 @@ def process_user_input(user_message, chat_history):
             field_finished = True
         else:
             status_for_question = "ask_again"
+            missing_slots_hint = build_missing_slots_hint(field, result.get("field_value", ""))
+            followup_target = get_strict_followup_target(field, result.get("field_value", ""))
             field_finished = False
     else:
         tracker.update_field(field, result)
@@ -911,13 +1090,20 @@ def process_user_input(user_message, chat_history):
     history_text = tracker.get_dialogue_history()
     start_question = time.time()
     try:
-        question = generate_question(field, metadata, history_text, status_for_question or "first_ask")
+        question = generate_question(
+            field,
+            metadata,
+            history_text,
+            status_for_question or "first_ask",
+            missing_slots_hint,
+            followup_target=followup_target,
+        )
     except Exception as exc:
         error_message = build_runtime_error_message(exc)
         add_assistant_message(error_message, chat_history)
         return "", chat_history, field, build_progress_html(), error_message, file_path, df
     end_question = time.time()
-    print(f"🔍 生成问题 generate_question() 耗时：{end_question - start_question:.2f} 秒")
+    print(f"生成问题 generate_question() 耗时：{end_question - start_question:.2f} 秒")
     add_assistant_message(question, chat_history)
 
     return "", chat_history, field, build_progress_html(), parse_output, file_path, df
@@ -941,7 +1127,7 @@ def on_edit(edited_df):
     excel_file = BASE_DIR / "medical_data.xlsx"
     edited_df.copy().to_excel(excel_file, index=False, engine="openpyxl")
     format_excel(excel_file, excel_file)
-    return gr.update(value="Saved" ), str(excel_file)
+    return gr.update(value="Saved"), gr.update(value=download_data)
 
 
 with gr.Blocks(title="AI医疗随访系统") as demo:
@@ -971,7 +1157,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 with gr.Row(elem_classes=["composer-row"]):
                     msg = gr.Textbox(
                         label="请输入您的回答",
-                        placeholder="请在这里输入您的回答",
+                        placeholder=DEFAULT_INPUT_PLACEHOLDER,
                         lines=1,
                         elem_classes=["compact-box"]
                     )
@@ -1026,6 +1212,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             report_status,
             report_saved_path,
             report_download_output,
+            msg,
         ],
     )
     demo.load(
@@ -1042,13 +1229,14 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             report_status,
             report_saved_path,
             report_download_output,
+            msg,
         ],
     )
     download_btn.click(fn=download_data, outputs=download_btn)
     dataframe_output.edit(fn=on_edit, inputs=dataframe_output, outputs=[status_output, download_btn])
     report_upload_event = report_upload.upload(
-        fn=advance_after_report_upload,
-        inputs=chatbot,
+        fn=handle_report_upload,
+        inputs=[report_upload, chatbot],
         outputs=[
             chatbot,
             question_output,
@@ -1056,13 +1244,15 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             parse_output,
             download_btn,
             dataframe_output,
+            upload_stage_note,
+            report_upload,
+            report_status,
+            report_saved_path,
+            report_download_output,
+            msg,
         ],
     )
     report_upload_event.then(
-        fn=save_uploaded_report,
-        inputs=report_upload,
-        outputs=[report_status, report_saved_path, report_download_output],
-    ).then(
         fn=None,
         js=AUTO_REPORT_DOWNLOAD_JS,
     )
@@ -1070,7 +1260,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
     def respond(message, chat_history):
         if not message or not message.strip():
             yield (
-                gr.update(value="", interactive=True),
+                gr.update(value="", interactive=True, placeholder=get_input_placeholder(chat_history[-1].get("content") if chat_history else None)),
                 clone_chat_history(chat_history),
                 gr.update(),
                 gr.update(),
@@ -1110,8 +1300,9 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
         assistant_messages = [item for item in new_messages if item.get("role") == "assistant"]
 
         if not assistant_messages:
+            upload_note, upload_file_update, upload_status_update, upload_path_update, msg_placeholder_update = build_upload_component_updates(current_field)
             yield (
-                gr.update(value="", interactive=True),
+                gr.update(value="", interactive=True, **msg_placeholder_update),
                 updated_chat_history,
                 current_field,
                 progress_text,
@@ -1119,7 +1310,10 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 file_path,
                 df,
                 gr.update(interactive=True),
-                *build_upload_component_updates(current_field),
+                upload_note,
+                upload_file_update,
+                upload_status_update,
+                upload_path_update,
                 gr.update(),
             )
             return
