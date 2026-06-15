@@ -71,6 +71,26 @@ FIELD_RULES = {
         "accepted_examples": ["5.6", "6.1mmol/L"],
         "followup_focus": "没有数值时才继续问。",
     },
+
+
+    "（若有高血压）药物使用情况": {
+        "minimum_requirement": "需要问到用药方案、规格以及服用频率。",
+        "accepted_examples": ["吃硝苯地平，一次三片，想起来就吃", "吃降压药，具体剂量记不清"],
+        "followup_focus": "患者没有明确回答问题时才继续追问",
+    },
+    "（若有糖尿病）药物使用情况": {
+        "minimum_requirement": "需要问到用药方案、规格以及服用频率。",
+        "accepted_examples": ["口服二甲双胍，规格是：500mg，每天两次", "打胰岛素，血糖控制还可以"],
+        "followup_focus": "患者没有回答问题时才继续追问",
+    },
+    "（若曾患冠心病）药物使用情况": {
+        "minimum_requirement": "需要问到用药方案、规格以及服用频率。",
+        "accepted_examples": ["口服二甲双胍，500mg，每天两次", "打胰岛素，血糖控制还可以"],
+        "followup_focus": "患者没有明确回答问题时才继续追问",
+    },
+
+
+
     "（若有高血压）药物控制方案": {
         "minimum_requirement": "知道大致用药方案或控制情况即可，不强求剂量非常精确。",
         "accepted_examples": ["口服硝苯地平，血压基本稳定", "吃降压药，具体剂量记不清"],
@@ -82,15 +102,11 @@ FIELD_RULES = {
         "followup_focus": "优先补最核心的药物或控制情况。",
     },
     "其余病史及用药情况": {
-        "minimum_requirement": "若没有其他病史，明确回答“无”即可；若有，则至少要提到具体疾病。",
-        "accepted_examples": ["无", "腰间盘突出", "有甲减，吃优甲乐"],
-        "followup_focus": "若只回答“有”但没说具体病名，才继续追问。",
+        "minimum_requirement": "患者明确回答了已诊断出的具体疾病才可填写疾病名，如果患者只说症状或特征，按无病史处理填写“无”即可；",
+        "accepted_examples": ["无", "腰间盘突出", "脑梗"],
+        "followup_focus": "若只回答“有”但没说具体病名，才继续追问是什么具体疾病;如果识别到“咳嗽、头疼、发烧、难受”这类症状词,不要当成有效病史，继续追问或按无病史(填写“无”)处理",
     },
-    "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果": {
-        "minimum_requirement": "至少要有疾病名，加上大致治疗或用药情况中的一部分即可。",
-        "accepted_examples": ["腰间盘突出，10余年，间断口服止痛药", "甲减，长期服用优甲乐"],
-        "followup_focus": "优先补病名，其次补治疗/用药。",
-    },
+
     "近一年是否存在手术切口疼痛": {
         "minimum_requirement": "只要能判断有/无/未知即可。",
         "accepted_examples": ["无", "有", "记不清"],
@@ -112,12 +128,12 @@ FIELD_RULES = {
         "followup_focus": "先要到一个大致数值，不强求化验时间。",
     },
     "尿常规：尿蛋白、尿潜血": {
-        "minimum_requirement": "能判断阴性/阳性，或给出检查结果概述即可。",
+        "minimum_requirement": "能判断阴性/阳性，或选择上传化验单结果即可。",
         "accepted_examples": ["阴性", "没有尿蛋白和尿潜血", "正常"],
         "followup_focus": "优先确认是否异常。",
     },
     "肾脏彩超": {
-        "minimum_requirement": "能判断正常/异常，或给出简要检查结论即可。",
+        "minimum_requirement": "能判断正常/异常，或选择上传化验单结果即可。",
         "accepted_examples": ["正常", "没事", "有囊肿"],
         "followup_focus": "不追问影像学细节。",
     },
@@ -448,149 +464,6 @@ def _finalize_strict_complex_result(result, slots, note):
     return _append_reason(adjusted, note)
 
 
-def _get_strict_complex_slots(field, value):
-    if field == "（若有高血压）药物控制方案":
-        return _evaluate_hypertension_medication_slots(value)
-    if field == "（若有糖尿病）药物控制方案":
-        return _evaluate_diabetes_medication_slots(value)
-    if field == "（若曾患冠心病）治疗方式":
-        return _evaluate_coronary_treatment_slots(value)
-    if field == "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症":
-        return _evaluate_cerebrovascular_treatment_slots(value)
-    if field == "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果":
-        return _evaluate_other_history_treatment_slots(value)
-    return {}
-
-
-def build_missing_slots_payload(field, value):
-    if field not in STRICT_COMPLEX_FIELDS:
-        return {}
-
-    label_map = {
-        "control_level": "控制水平",
-        "drug_name": "药物名称",
-        "spec": "规格",
-        "frequency": "频次",
-        "dose_each_time": "单次剂量",
-        "insulin_name": "胰岛素名称",
-        "injection_time": "注射时间",
-        "injection_units": "注射单位数",
-        "treatment_type": "治疗方式",
-        "stenosis": "是否仍有狭窄",
-        "symptom_improved": "症状是否好转",
-        "recurred": "是否再患",
-        "disease_name": "疾病名称",
-        "sequelae": "是否有后遗症",
-        "surgery_time": "手术时间",
-        "surgery_type": "手术术式",
-    }
-    slots = _get_strict_complex_slots(field, value)
-    payload = {
-        "field": field,
-        "answered": [],
-        "unknown": [],
-        "missing": [],
-    }
-    for key, slot_status in slots.items():
-        if slot_status == "not_applicable":
-            continue
-        label = label_map.get(key, key)
-        if slot_status in payload:
-            payload[slot_status].append(label)
-    return payload
-
-
-def build_missing_slots_hint(field, value):
-    payload = build_missing_slots_payload(field, value)
-    if not payload:
-        return ""
-    ordered = []
-    ordered.extend(f"{label}=有" for label in payload["answered"])
-    ordered.extend(f"{label}=不知道" for label in payload["unknown"])
-    ordered.extend(f"{label}=缺" for label in payload["missing"])
-
-    summary = "当前已知：" + "，".join(ordered) if ordered else "当前已知：无"
-    missing_summary = "仍需追问：" + "、".join(payload["missing"]) if payload["missing"] else "仍需追问：无"
-    unknown_summary = (
-        "已明确不知道：" + "、".join(payload["unknown"]) if payload["unknown"] else "已明确不知道：无"
-    )
-    return (
-        f"{summary}。{missing_summary}。{unknown_summary}。"
-        "请优先追问仍然缺失的槽位，不要重复追问已经明确不知道的槽位。"
-    )
-
-
-def get_strict_followup_target(field, value):
-    if field not in STRICT_COMPLEX_FIELDS:
-        return None
-
-    slots = _get_strict_complex_slots(field, value)
-    sequence_map = {
-        "（若有高血压）药物控制方案": [
-            "drug_name",
-            "medication_detail",
-            "control_level",
-        ],
-        "（若有糖尿病）药物控制方案": [
-            "drug_name",
-            "medication_detail",
-            "insulin_name",
-            "injection_time",
-            "injection_units",
-            "control_level",
-        ],
-        "（若曾患冠心病）治疗方式": [
-            "treatment_type",
-            "surgery_time",
-            "surgery_type",
-            "drug_name",
-            "medication_detail",
-            "stenosis",
-            "symptom_improved",
-            "recurred",
-        ],
-        "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症": [
-            "disease_name",
-            "treatment_type",
-            "surgery_time",
-            "surgery_type",
-            "drug_name",
-            "medication_detail",
-            "symptom_improved",
-            "recurred",
-            "sequelae",
-        ],
-        "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果": [
-            "disease_name",
-            "treatment_type",
-            "surgery_time",
-            "surgery_type",
-            "drug_name",
-            "medication_detail",
-            "symptom_improved",
-            "recurred",
-        ],
-    }
-    medication_detail_slots = ("spec", "frequency", "dose_each_time")
-
-    for item in sequence_map[field]:
-        if item == "medication_detail":
-            missing_detail = [
-                slot_name
-                for slot_name in medication_detail_slots
-                if slots.get(slot_name) == "missing"
-            ]
-            if slots.get("drug_name") == "answered" and missing_detail:
-                return {
-                    "kind": "group",
-                    "group": "medication_detail",
-                    "missing_slots": missing_detail,
-                }
-            continue
-
-        if slots.get(item) == "missing":
-            return {"kind": "slot", "slot": item}
-    return None
 
 
 def get_field_rule(field):
@@ -685,22 +558,9 @@ def apply_field_completion_rules(field, result):
             return _append_reason(adjusted, "按疼痛评分字段规则收束。")
         return adjusted
 
-    if field in STRICT_COMPLEX_FIELDS:
-        if field == "（若有高血压）药物控制方案":
-            slots = _evaluate_hypertension_medication_slots(value)
-        elif field == "（若有糖尿病）药物控制方案":
-            slots = _evaluate_diabetes_medication_slots(value)
-        elif field == "（若曾患冠心病）治疗方式":
-            slots = _evaluate_coronary_treatment_slots(value)
-        elif field == "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症":
-            slots = _evaluate_cerebrovascular_treatment_slots(value)
-        else:
-            slots = _evaluate_other_history_treatment_slots(value)
-        return _finalize_strict_complex_result(adjusted, slots, "按复杂字段槽位规则校正。")
-
     if field in TEXT_COMPLETE_FIELDS:
         normalized = _normalize_yes_no(value) if field == "其余病史及用药情况" else value
-        if field == "其余病史及用药情况" and normalized in {"否", "未知"}:
+        if field == "其余病史及用药情况" and normalized in {"否", "无","未知","没有"}:
             adjusted["field_value"] = normalized
             adjusted["status"] = "done"
             adjusted["completion"] = "complete"

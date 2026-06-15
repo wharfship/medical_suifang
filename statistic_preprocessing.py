@@ -116,7 +116,7 @@ def load_excel_template(file_path):
         if '追问上限' in row and not pd.isna(row['追问上限']):
             max_attempts = int(row['追问上限'])
         else:
-            max_attempts = DEFAULT_MAX_ATTEMPTS.get(field, 2)
+            max_attempts = DEFAULT_MAX_ATTEMPTS.get(field, 4)
 
         field_info[field] = {
             '描述': description,

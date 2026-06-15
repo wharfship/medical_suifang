@@ -10,9 +10,6 @@ from pathlib import Path
 from excel_adjusting import *
 from field_rules import (
     apply_field_completion_rules,
-    build_missing_slots_hint,
-    get_strict_followup_target,
-    STRICT_COMPLEX_FIELDS,
 )
 from lab_report_extractor import extract_followup_value_from_rows
 from medical_output_flow import DEFAULT_PATIENT_NAME, persist_followup_export
@@ -24,7 +21,7 @@ from workflow_status import (
     normalize_parse_result,
 )
 
-FILE_NAME = "复杂问题.xls"
+FILE_NAME = "子问题.xls"
 BASE_DIR = Path(__file__).resolve().parent
 excel_path = BASE_DIR / FILE_NAME
 if not excel_path.exists():
@@ -50,6 +47,33 @@ TARGETED_UPLOAD_FIELDS = {
 DEFAULT_INPUT_PLACEHOLDER = "请直接输入您的回答，如不清楚也可以说“不知道”"
 TARGETED_UPLOAD_PLACEHOLDER = "这题可以直接说，也可以上传化验单照片"
 KIDNEY_ULTRASOUND_FIELD = "肾脏彩超"
+COMPUTED_SUMMARY_FIELDS = {
+    "（若有高血压）药物控制方案": [
+        ("药物使用情况", "（若有高血压）药物使用情况"),
+        ("目前控制情况", "（若有高血压）目前控制情况"),
+    ],
+    "（若有糖尿病）药物控制方案": [
+        ("药物使用情况", "（若有糖尿病）药物使用情况"),
+        ("胰岛素使用情况", "（若有糖尿病）胰岛素使用情况"),
+        ("目前控制情况", "（若有糖尿病）目前控制情况"),
+    ],
+    "（若曾患冠心病）治疗方式": [
+        ("药物使用情况", "（若曾患冠心病）药物使用情况"),
+        ("手术情况", "（若曾患冠心病）手术情况"),
+        ("目前控制情况", "（若曾患冠心病）目前控制情况"),
+    ],
+    "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症": [
+        ("患病类型", "（若曾患脑血管病）患病类型"),
+        ("药物使用情况", "（若曾患脑血管病）药物使用情况"),
+        ("手术情况", "（若曾患脑血管病）手术情况"),
+        ("目前控制情况", "（若曾患脑血管病）目前控制情况"),
+    ],
+    "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果": [
+        ("药物使用情况", "（若有其余病史）药物使用情况"),
+        ("手术情况", "（若有其余病史）手术情况"),
+        ("目前控制情况", "（若有其余病史）目前控制情况"),
+    ],
+}
 
 CUSTOM_CSS = """
 :root {
@@ -654,6 +678,7 @@ def build_upload_component_updates(current_field, clear_values=False):
 
 def export_tracker_data():
     df = pd.DataFrame(tracker.get_parse_history())
+    df = filter_exported_child_rows(df)
     df = df.rename(columns=COLUMN_NAMES)
     excel_file = BASE_DIR / "medical_data.xlsx"
     df.to_excel(excel_file, index=False, engine="openpyxl")
@@ -719,16 +744,59 @@ def build_bmi_result():
     }
 
 
-def maybe_finalize_bmi(current_chat_history):
-    next_field = tracker.get_next_field()
-    if next_field != "BMI":
-        return next_field
+def build_summary_field_result(field):
+    parts = COMPUTED_SUMMARY_FIELDS.get(field, [])
+    summary_value = "；".join(
+        f"{label}：{tracker.get_field_value(child_field) or ''}"
+        for label, child_field in parts
+    )
+    child_evidence = "\n".join(
+        tracker.filled_data.get(child_field, {}).get("evidence", "")
+        for _, child_field in parts
+        if tracker.filled_data.get(child_field, {}).get("evidence", "")
+    )
+    return {
+        "status": "done",
+        "completion": "complete",
+        "field_value": summary_value,
+        "confidence": 1.0,
+        "reasoning": f"根据已完成的子字段自动汇总 {field}。",
+        "evidence": child_evidence,
+    }
 
-    bmi_result = build_bmi_result()
-    tracker.update_field(next_field, bmi_result, "由当前身高和当前体重自动计算")
-    add_assistant_message(build_confirmation_message(next_field, bmi_result), current_chat_history)
-    export_tracker_data()
-    return tracker.get_next_field()
+
+def filter_exported_child_rows(df):
+    if df.empty or "field" not in df.columns:
+        return df
+
+    completed_fields = set(df["field"].tolist())
+    hidden_child_fields = {
+        child_field
+        for parent_field, parts in COMPUTED_SUMMARY_FIELDS.items()
+        if parent_field in completed_fields
+        for _, child_field in parts
+    }
+    if not hidden_child_fields:
+        return df
+
+    return df[~df["field"].isin(hidden_child_fields)].reset_index(drop=True)
+
+
+def maybe_finalize_computed_fields(current_chat_history):
+    while True:
+        next_field = tracker.get_next_field()
+        if next_field == "BMI":
+            computed_result = build_bmi_result()
+            evidence = "由当前身高和当前体重自动计算"
+        elif next_field in COMPUTED_SUMMARY_FIELDS:
+            computed_result = build_summary_field_result(next_field)
+            evidence = computed_result["evidence"]
+        else:
+            return next_field
+
+        tracker.update_field(next_field, computed_result, evidence)
+        add_assistant_message(build_confirmation_message(next_field, computed_result), current_chat_history)
+        export_tracker_data()
 
 
 def build_runtime_error_message(exc):
@@ -739,18 +807,6 @@ def build_runtime_error_message(exc):
 
 def clone_chat_history(history):
     return [dict(item) if isinstance(item, dict) else item for item in (history or [])]
-
-
-def merge_strict_followup_value(field, previous_value, current_value):
-    if field not in STRICT_COMPLEX_FIELDS:
-        return current_value
-
-    parts = [str(previous_value or "").strip(), str(current_value or "").strip()]
-    merged_parts = []
-    for part in parts:
-        if part and part not in merged_parts:
-            merged_parts.append(part)
-    return "，".join(merged_parts)
 
 
 def save_uploaded_report(uploaded_file, current_field=None):
@@ -835,7 +891,7 @@ def advance_after_report_upload(current_chat_history, extracted_rows=None):
     add_assistant_message(build_confirmation_message(field, upload_result), updated_chat_history)
 
     df, file_path = export_tracker_data()
-    next_field = maybe_finalize_bmi(updated_chat_history)
+    next_field = maybe_finalize_computed_fields(updated_chat_history)
     df, file_path = export_tracker_data()
 
     parse_text = (
@@ -1032,10 +1088,6 @@ def process_user_input(user_message, chat_history):
     # 先把模型输出归一化，再用字段规则做一次“填表口径”校正。
     raw_result["field"] = field
     result = normalize_parse_result(raw_result)
-    previous_value = tracker.get_field_value(field)
-    merged_value = merge_strict_followup_value(field, previous_value, result.get("field_value", ""))
-    if merged_value != result.get("field_value", ""):
-        result["field_value"] = merged_value
     result = apply_field_completion_rules(field, result)
     end_parse = time.time()
 
@@ -1049,8 +1101,6 @@ def process_user_input(user_message, chat_history):
     )
 
     status_for_question = None
-    followup_target = None
-    missing_slots_hint = ""
     field_finished = is_final_status(result["status"])
 
     if result["status"] == "ask_again":
@@ -1066,8 +1116,6 @@ def process_user_input(user_message, chat_history):
             field_finished = True
         else:
             status_for_question = "ask_again"
-            missing_slots_hint = build_missing_slots_hint(field, result.get("field_value", ""))
-            followup_target = get_strict_followup_target(field, result.get("field_value", ""))
             field_finished = False
     else:
         tracker.update_field(field, result)
@@ -1077,7 +1125,7 @@ def process_user_input(user_message, chat_history):
     df, file_path = export_tracker_data()
 
     if field_finished:
-        field = maybe_finalize_bmi(chat_history)
+        field = maybe_finalize_computed_fields(chat_history)
         df, file_path = export_tracker_data()
     else:
         field = tracker.get_next_field()
@@ -1095,8 +1143,6 @@ def process_user_input(user_message, chat_history):
             metadata,
             history_text,
             status_for_question or "first_ask",
-            missing_slots_hint,
-            followup_target=followup_target,
         )
     except Exception as exc:
         error_message = build_runtime_error_message(exc)

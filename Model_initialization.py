@@ -32,34 +32,8 @@ def _append_field_specific_guidance(prompt, field):
     return f"{prompt}\n{rule_prompt}\n"
 
 
-def _build_strict_followup_question(followup_target):
-    if not followup_target:
-        return ""
-
-    if followup_target.get("kind") == "slot" and followup_target.get("slot") == "drug_name":
-        return "您现在吃的是什么药？"
-
-    if followup_target.get("kind") == "group" and followup_target.get("group") == "medication_detail":
-        prompts = {
-            "spec": "这个药的规格是多少？",
-            "frequency": "一天吃几次？",
-            "dose_each_time": "一次吃几片或几粒？",
-        }
-        return "".join(
-            prompts[name]
-            for name in followup_target.get("missing_slots", [])
-            if name in prompts
-        )
-
-    return ""
-
-
-def generate_question(field, metadata, history, status="first_ask", missing_slots_hint="", followup_target=None):
+def generate_question(field, metadata, history, status="first_ask"):
     """生成针对性提问"""
-    strict_question = _build_strict_followup_question(followup_target)
-    if strict_question:
-        return strict_question
-
     prompt = f"""
     你是一名医疗随访助手，需要继续完成患者随访。
     当前字段：{field}
@@ -67,7 +41,6 @@ def generate_question(field, metadata, history, status="first_ask", missing_slot
     参考提问方式：{metadata[field]['示例'] or '无'}
     已有对话：{history}
     当前流程状态：{status}
-    当前缺失槽位提示：{missing_slots_hint or '无'}
 
     请只生成下一句最合适的问题。规则：
     1. 如果状态是 ask_again，只围绕仍缺失的核心信息补问，不重复已经确认的内容。
