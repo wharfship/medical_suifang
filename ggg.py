@@ -4,7 +4,9 @@ import html
 import os
 import re
 import shutil
+import threading
 import time
+import uuid
 from pathlib import Path
 
 from excel_adjusting import *
@@ -12,7 +14,7 @@ from field_rules import (
     apply_field_completion_rules,
 )
 from lab_report_extractor import extract_followup_value_from_rows
-from medical_output_flow import DEFAULT_PATIENT_NAME, persist_followup_export
+from medical_output_flow import DEFAULT_PATIENT_NAME, OUTPUT_DIR, persist_followup_export
 from report_upload_flow import run_report_upload_flow_with_rows, save_report_file_only
 from workflow_status import (
     finalize_after_attempt_limit,
@@ -32,6 +34,10 @@ field_attempts = {}
 chat_history = []   # 专门给 gradio 的 Chatbot 用的
 last_report_output_path = ""
 PATIENT_NAME = DEFAULT_PATIENT_NAME
+CURRENT_WORKING_DIR = BASE_DIR
+SESSION_WORK_ROOT = OUTPUT_DIR / "_sessions"
+SESSION_LOCK = threading.RLock()
+SESSION_SCOPED_RUNTIME = False
 
 ALLOWED_REPORT_SUFFIXES = {".docx", ".png", ".jpg", ".jpeg"}
 ALLOWED_REPORT_FILE_TYPES = [".docx", ".png", ".jpg", ".jpeg"]
@@ -74,6 +80,94 @@ COMPUTED_SUMMARY_FIELDS = {
         ("目前控制情况", "（若有其余病史）目前控制情况"),
     ],
 }
+
+
+def normalize_patient_name(patient_name):
+    text = str(patient_name or "").strip()
+    return text or DEFAULT_PATIENT_NAME
+
+
+def sanitize_path_fragment(value, fallback="session"):
+    text = re.sub(r'[\\/:*?"<>|]+', "_", str(value or "").strip())
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("._")
+    return text or fallback
+
+
+def create_session_working_dir(patient_name):
+    SESSION_WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    safe_name = sanitize_path_fragment(patient_name, fallback="patient")
+    session_id = uuid.uuid4().hex[:8]
+    session_dir = SESSION_WORK_ROOT / f"{safe_name}_{session_id}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
+
+
+def build_session_state(patient_name=None):
+    normalized_name = normalize_patient_name(patient_name)
+    session_metadata = load_excel_template(excel_path)
+    working_dir = create_session_working_dir(normalized_name)
+    return {
+        "patient_name": normalized_name,
+        "metadata": session_metadata,
+        "tracker": FieldStateTracker(session_metadata),
+        "field_attempts": {},
+        "chat_history": [],
+        "last_report_output_path": "",
+        "working_dir": str(working_dir),
+    }
+
+
+def apply_session_state(session_state=None, patient_name=None, session_scoped=False):
+    global tracker, metadata, field_attempts, chat_history, last_report_output_path, PATIENT_NAME, CURRENT_WORKING_DIR, SESSION_SCOPED_RUNTIME
+
+    active_state = session_state or build_session_state(patient_name)
+    active_state["patient_name"] = normalize_patient_name(patient_name or active_state.get("patient_name"))
+    active_state["metadata"] = active_state.get("metadata") or load_excel_template(excel_path)
+    active_state["tracker"] = active_state.get("tracker") or FieldStateTracker(active_state["metadata"])
+    active_state["field_attempts"] = active_state.get("field_attempts") or {}
+    active_state["chat_history"] = clone_chat_history(active_state.get("chat_history"))
+    active_state["last_report_output_path"] = str(active_state.get("last_report_output_path") or "")
+    SESSION_SCOPED_RUNTIME = bool(session_scoped)
+
+    if SESSION_SCOPED_RUNTIME:
+        working_dir = Path(active_state.get("working_dir") or create_session_working_dir(active_state["patient_name"]))
+        working_dir.mkdir(parents=True, exist_ok=True)
+        active_state["working_dir"] = str(working_dir)
+    else:
+        working_dir = BASE_DIR
+        active_state["working_dir"] = str(working_dir)
+
+    metadata = active_state["metadata"]
+    tracker = active_state["tracker"]
+    field_attempts = active_state["field_attempts"]
+    chat_history = active_state["chat_history"]
+    last_report_output_path = active_state["last_report_output_path"]
+    PATIENT_NAME = active_state["patient_name"]
+    CURRENT_WORKING_DIR = working_dir
+    return active_state
+
+
+def snapshot_session_state():
+    return {
+        "patient_name": PATIENT_NAME,
+        "metadata": metadata,
+        "tracker": tracker,
+        "field_attempts": field_attempts,
+        "chat_history": clone_chat_history(chat_history),
+        "last_report_output_path": last_report_output_path,
+        "working_dir": str(CURRENT_WORKING_DIR),
+    }
+
+
+def get_runtime_excel_path():
+    return CURRENT_WORKING_DIR / "medical_data.xlsx"
+
+
+def get_session_patient_output_dir():
+    if not SESSION_SCOPED_RUNTIME or CURRENT_WORKING_DIR == BASE_DIR:
+        return None
+    return CURRENT_WORKING_DIR
 
 CUSTOM_CSS = """
 :root {
@@ -680,7 +774,7 @@ def export_tracker_data():
     df = pd.DataFrame(tracker.get_parse_history())
     df = filter_exported_child_rows(df)
     df = df.rename(columns=COLUMN_NAMES)
-    excel_file = BASE_DIR / "medical_data.xlsx"
+    excel_file = get_runtime_excel_path()
     df.to_excel(excel_file, index=False, engine="openpyxl")
     format_excel(excel_file, excel_file)
     return df, str(excel_file)
@@ -823,20 +917,24 @@ def save_uploaded_report(uploaded_file, current_field=None):
         return f"仅支持以下格式的化验单: {allowed_text}", "", None, gr.update(value=None), []
 
     if current_field == KIDNEY_ULTRASOUND_FIELD:
+        patient_output_dir = get_session_patient_output_dir()
         status, saved_path = save_report_file_only(
             str(uploaded_path),
             patient_name=PATIENT_NAME,
             field_name=current_field,
+            **({"patient_output_dir": patient_output_dir} if patient_output_dir else {}),
         )
         last_report_output_path = ""
         if saved_path:
             status = f"{status}，已用于当前题：{current_field}"
         return status, saved_path or "", None, gr.update(value=None), []
 
+    patient_output_dir = get_session_patient_output_dir()
     status, output_path, rows = run_report_upload_flow_with_rows(
         str(uploaded_path),
         patient_name=PATIENT_NAME,
         field_name=current_field,
+        **({"patient_output_dir": patient_output_dir} if patient_output_dir else {}),
     )
     last_report_output_path = output_path or ""
     if current_field and output_path:
@@ -909,50 +1007,54 @@ def advance_after_report_upload(current_chat_history, extracted_rows=None):
     return updated_chat_history, next_field, build_progress_html(), parse_text, file_path, df
 
 
-def handle_report_upload(uploaded_file, current_chat_history):
-    current_field = tracker.get_next_field()
-    status_text, saved_path, download_path, upload_reset, rows = save_uploaded_report(
-        uploaded_file,
-        current_field=current_field,
-    )
+def handle_report_upload(session_state, uploaded_file, current_chat_history):
+    with SESSION_LOCK:
+        apply_session_state(session_state, session_scoped=True)
+        current_field = tracker.get_next_field()
+        status_text, saved_path, download_path, upload_reset, rows = save_uploaded_report(
+            uploaded_file,
+            current_field=current_field,
+        )
 
-    if not saved_path:
-        df, file_path = export_tracker_data()
-        upload_note, _, _, _, _ = build_upload_component_updates(current_field, clear_values=True)
+        if not saved_path:
+            df, file_path = export_tracker_data()
+            upload_note, _, _, _, _ = build_upload_component_updates(current_field, clear_values=True)
+            return (
+                snapshot_session_state(),
+                clone_chat_history(current_chat_history),
+                current_field,
+                build_progress_html(),
+                status_text,
+                file_path,
+                df,
+                upload_note,
+                upload_reset,
+                status_text,
+                "",
+                download_path,
+                gr.update(placeholder=get_input_placeholder(current_field)),
+            )
+
+        updated_chat_history, next_field, progress_text, parse_text, file_path, df = advance_after_report_upload(
+            current_chat_history,
+            rows,
+        )
+        upload_note, _, _, _, _ = build_upload_component_updates(next_field, clear_values=True)
         return (
-            clone_chat_history(current_chat_history),
-            current_field,
-            build_progress_html(),
-            status_text,
+            snapshot_session_state(),
+            updated_chat_history,
+            next_field,
+            progress_text,
+            parse_text,
             file_path,
             df,
             upload_note,
             upload_reset,
             status_text,
-            "",
+            saved_path,
             download_path,
-            gr.update(placeholder=get_input_placeholder(current_field)),
+            gr.update(placeholder=get_input_placeholder(next_field)),
         )
-
-    updated_chat_history, next_field, progress_text, parse_text, file_path, df = advance_after_report_upload(
-        current_chat_history,
-        rows,
-    )
-    upload_note, _, _, _, _ = build_upload_component_updates(next_field, clear_values=True)
-    return (
-        updated_chat_history,
-        next_field,
-        progress_text,
-        parse_text,
-        file_path,
-        df,
-        upload_note,
-        upload_reset,
-        status_text,
-        saved_path,
-        download_path,
-        gr.update(placeholder=get_input_placeholder(next_field)),
-    )
 
 
 def stream_assistant_messages(
@@ -1013,29 +1115,48 @@ def stream_assistant_messages(
     )
 
 
-def init_system():
+def init_system(session_state=None, patient_name=DEFAULT_PATIENT_NAME):
     """初始化系统, 恢复到初始数据"""
-    global tracker, metadata, last_report_output_path
-    metadata = load_excel_template(excel_path)
-    tracker = FieldStateTracker(metadata)
-    field_attempts.clear()
-    chat_history.clear()
-    last_report_output_path = ""
+    include_session_state = session_state is not None
+    with SESSION_LOCK:
+        active_state = apply_session_state(None, patient_name, session_scoped=include_session_state)
 
-    _, file_path = export_tracker_data()
+        _, file_path = export_tracker_data()
 
-    greeting = "您好，我是医疗随访助手，需要了解您的健康状况。"
-    add_assistant_message(greeting, chat_history)
+        greeting = "您好，我是医疗随访助手，需要了解您的健康状况。"
+        add_assistant_message(greeting, chat_history)
 
-    field = tracker.get_next_field()
-    history_text = tracker.get_dialogue_history()
-    try:
-        question = generate_question(field, metadata, history_text)
-    except Exception as exc:
-        add_assistant_message(build_runtime_error_message(exc), chat_history)
+        field = tracker.get_next_field()
+        history_text = tracker.get_dialogue_history()
+        try:
+            question = generate_question(field, metadata, history_text)
+        except Exception as exc:
+            add_assistant_message(build_runtime_error_message(exc), chat_history)
+            upload_note, upload_file_update, upload_status_update, upload_path_update, _ = build_upload_component_updates(field, clear_values=True)
+            result = (
+                snapshot_session_state(),
+                "初始化系统失败",
+                chat_history,
+                field,
+                build_progress_html(),
+                file_path,
+                pd.DataFrame(),
+                upload_note,
+                upload_file_update,
+                upload_status_update,
+                upload_path_update,
+                gr.update(value=None),
+                gr.update(placeholder=get_input_placeholder(field)),
+            )
+            if not include_session_state:
+                return result[1:]
+            return result
+
+        add_assistant_message(question, chat_history)
         upload_note, upload_file_update, upload_status_update, upload_path_update, _ = build_upload_component_updates(field, clear_values=True)
-        return (
-            "初始化系统失败",
+        result = (
+            snapshot_session_state(),
+            "初始化系统成功",
             chat_history,
             field,
             build_progress_html(),
@@ -1048,31 +1169,16 @@ def init_system():
             gr.update(value=None),
             gr.update(placeholder=get_input_placeholder(field)),
         )
-
-    add_assistant_message(question, chat_history)
-    upload_note, upload_file_update, upload_status_update, upload_path_update, _ = build_upload_component_updates(field, clear_values=True)
-    return (
-        "初始化系统成功",
-        chat_history,
-        field,
-        build_progress_html(),
-        file_path,
-        pd.DataFrame(),
-        upload_note,
-        upload_file_update,
-        upload_status_update,
-        upload_path_update,
-        gr.update(value=None),
-        gr.update(placeholder=get_input_placeholder(field)),
-    )
+        if include_session_state:
+            return result
+        return result[1:]
 
 
-def process_user_input(user_message, chat_history):
+def process_user_input(user_message, current_chat_history):
     """处理用户输入"""
-    global tracker, field_attempts
 
     tracker.add_dialogue("Patient", user_message)
-    chat_history.append({"role": "user", "content": user_message})
+    current_chat_history.append({"role": "user", "content": user_message})
 
     field = tracker.get_next_field()
     history_text = tracker.get_dialogue_history()
@@ -1082,9 +1188,9 @@ def process_user_input(user_message, chat_history):
         raw_result = parse_answer(field, user_message, metadata[field]["描述"], history_text)
     except Exception as exc:
         error_message = build_runtime_error_message(exc)
-        add_assistant_message(error_message, chat_history)
+        add_assistant_message(error_message, current_chat_history)
         df, file_path = export_tracker_data()
-        return "", chat_history, field, build_progress_html(), error_message, file_path, df
+        return "", current_chat_history, field, build_progress_html(), error_message, file_path, df
     # 先把模型输出归一化，再用字段规则做一次“填表口径”校正。
     raw_result["field"] = field
     result = normalize_parse_result(raw_result)
@@ -1112,7 +1218,7 @@ def process_user_input(user_message, chat_history):
             result = finalize_after_attempt_limit(result)
             tracker.update_field(field, result)
             field_attempts.pop(field, None)
-            add_assistant_message(build_confirmation_message(field, result), chat_history)
+            add_assistant_message(build_confirmation_message(field, result), current_chat_history)
             field_finished = True
         else:
             status_for_question = "ask_again"
@@ -1120,20 +1226,20 @@ def process_user_input(user_message, chat_history):
     else:
         tracker.update_field(field, result)
         field_attempts.pop(field, None)
-        add_assistant_message(build_confirmation_message(field, result), chat_history)
+        add_assistant_message(build_confirmation_message(field, result), current_chat_history)
 
     df, file_path = export_tracker_data()
 
     if field_finished:
-        field = maybe_finalize_computed_fields(chat_history)
+        field = maybe_finalize_computed_fields(current_chat_history)
         df, file_path = export_tracker_data()
     else:
         field = tracker.get_next_field()
 
     if field is None:
         completion_msg = "所有信息已收集完成，请点击“导出结果”按钮下载随访结果。"
-        add_assistant_message(completion_msg, chat_history)
-        return "", chat_history, field, build_progress_html(), parse_output, file_path, df
+        add_assistant_message(completion_msg, current_chat_history)
+        return "", current_chat_history, field, build_progress_html(), parse_output, file_path, df
 
     history_text = tracker.get_dialogue_history()
     start_question = time.time()
@@ -1146,41 +1252,145 @@ def process_user_input(user_message, chat_history):
         )
     except Exception as exc:
         error_message = build_runtime_error_message(exc)
-        add_assistant_message(error_message, chat_history)
-        return "", chat_history, field, build_progress_html(), error_message, file_path, df
+        add_assistant_message(error_message, current_chat_history)
+        return "", current_chat_history, field, build_progress_html(), error_message, file_path, df
     end_question = time.time()
     print(f"生成问题 generate_question() 耗时：{end_question - start_question:.2f} 秒")
-    add_assistant_message(question, chat_history)
+    add_assistant_message(question, current_chat_history)
 
-    return "", chat_history, field, build_progress_html(), parse_output, file_path, df
-
-
-
-def download_data():
-    file_path = BASE_DIR / "medical_data.xlsx"
-    if not os.path.exists(file_path):
-        _, generated_path = export_tracker_data()
-        file_path = Path(generated_path)
-    return persist_followup_export(
-        file_path,
-        uploaded_report_path=last_report_output_path or None,
-        patient_name=PATIENT_NAME,
-    )
+    return "", current_chat_history, field, build_progress_html(), parse_output, file_path, df
 
 
-def on_edit(edited_df):
+
+def download_data(session_state=None, patient_name=None):
+    with SESSION_LOCK:
+        apply_session_state(session_state, patient_name, session_scoped=session_state is not None)
+        file_path = get_runtime_excel_path()
+        if not os.path.exists(file_path):
+            _, generated_path = export_tracker_data()
+            file_path = Path(generated_path)
+        return persist_followup_export(
+            file_path,
+            uploaded_report_path=last_report_output_path or None,
+            patient_name=PATIENT_NAME,
+        )
+
+
+def on_edit(session_state=None, patient_name=None, edited_df=None):
     """Save edited dataframe."""
-    excel_file = BASE_DIR / "medical_data.xlsx"
-    edited_df.copy().to_excel(excel_file, index=False, engine="openpyxl")
-    format_excel(excel_file, excel_file)
-    return gr.update(value="Saved"), gr.update(value=download_data)
+    if edited_df is None:
+        edited_df = session_state
+        session_state = None
+        patient_name = None
+    with SESSION_LOCK:
+        apply_session_state(session_state, patient_name, session_scoped=session_state is not None)
+        excel_file = get_runtime_excel_path()
+        edited_df.copy().to_excel(excel_file, index=False, engine="openpyxl")
+        format_excel(excel_file, excel_file)
+        return gr.update(value="Saved"), gr.update(value=download_data)
+
+
+def respond(*args):
+    if len(args) == 2:
+        current_session_state = None
+        patient_name = DEFAULT_PATIENT_NAME
+        message, current_chat_history = args
+        include_session_state = False
+    elif len(args) == 4:
+        current_session_state, patient_name, message, current_chat_history = args
+        include_session_state = True
+    else:
+        raise TypeError("respond expects either (message, chat_history) or (session_state, patient_name, message, chat_history)")
+
+    with SESSION_LOCK:
+        apply_session_state(current_session_state, patient_name, session_scoped=include_session_state)
+        if not message or not message.strip():
+            payload = (
+                gr.update(value="", interactive=True, placeholder=get_input_placeholder(tracker.get_next_field())),
+                clone_chat_history(chat_history),
+                gr.update(),
+                gr.update(),
+                "请输入内容后再发送。",
+                gr.update(),
+                gr.update(),
+                gr.update(interactive=True),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+            )
+            yield (snapshot_session_state(), *payload) if include_session_state else payload
+            return
+
+        base_history = clone_chat_history(chat_history)
+        pending_history = clone_chat_history(base_history)
+        pending_history.append({"role": "user", "content": message})
+        payload = (
+            gr.update(value="", interactive=False),
+            pending_history,
+            gr.update(),
+            gr.update(),
+            "正在解析并生成回复，请稍候...",
+            gr.update(),
+            gr.update(),
+            gr.update(interactive=False),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
+        yield (snapshot_session_state(), *payload) if include_session_state else payload
+
+        _, updated_chat_history, current_field, progress_text, parse_text, file_path, df = process_user_input(message, base_history)
+        new_messages = updated_chat_history[len(chat_history or []):]
+        assistant_messages = [item for item in new_messages if item.get("role") == "assistant"]
+
+        if not assistant_messages:
+            upload_note, upload_file_update, upload_status_update, upload_path_update, msg_placeholder_update = build_upload_component_updates(current_field)
+            payload = (
+                gr.update(value="", interactive=True, **msg_placeholder_update),
+                updated_chat_history,
+                current_field,
+                progress_text,
+                parse_text,
+                file_path,
+                df,
+                gr.update(interactive=True),
+                upload_note,
+                upload_file_update,
+                upload_status_update,
+                upload_path_update,
+                gr.update(),
+            )
+            yield (snapshot_session_state(), *payload) if include_session_state else payload
+            return
+
+        for payload in stream_assistant_messages(
+            pending_history,
+            assistant_messages,
+            current_field,
+            progress_text,
+            parse_text,
+            file_path,
+            df,
+        ):
+            yield (snapshot_session_state(), *payload) if include_session_state else payload
 
 
 with gr.Blocks(title="AI医疗随访系统") as demo:
+    session_state = gr.State(build_session_state(DEFAULT_PATIENT_NAME))
     with gr.Column(elem_classes=["app-shell"]):
         with gr.Row(elem_classes=["workspace-row"]):
             with gr.Column(scale=1, elem_classes=["sidebar-card", "sidebar-stack"]):
                 gr.Markdown("### 随访进度", elem_classes=["section-title"])
+                patient_name_input = gr.Textbox(
+                    label="患者姓名",
+                    value=DEFAULT_PATIENT_NAME,
+                    placeholder="请输入当前患者姓名",
+                    elem_classes=["compact-box", "metric-box"],
+                )
                 with gr.Group(elem_classes=["sidebar-primary"]):
                     progress_output = gr.HTML(build_progress_html())
                 with gr.Row(elem_classes=["button-row"]):
@@ -1246,7 +1456,9 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
 
     init_btn.click(
         fn=init_system,
+        inputs=[session_state, patient_name_input],
         outputs=[
+            session_state,
             status_output,
             chatbot,
             question_output,
@@ -1263,7 +1475,9 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
     )
     demo.load(
         fn=init_system,
+        inputs=[session_state, patient_name_input],
         outputs=[
+            session_state,
             status_output,
             chatbot,
             question_output,
@@ -1278,12 +1492,21 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             msg,
         ],
     )
-    download_btn.click(fn=download_data, outputs=download_btn)
-    dataframe_output.edit(fn=on_edit, inputs=dataframe_output, outputs=[status_output, download_btn])
+    download_btn.click(
+        fn=download_data,
+        inputs=[session_state, patient_name_input],
+        outputs=download_btn,
+    )
+    dataframe_output.edit(
+        fn=on_edit,
+        inputs=[session_state, patient_name_input, dataframe_output],
+        outputs=[status_output, download_btn],
+    )
     report_upload_event = report_upload.upload(
         fn=handle_report_upload,
-        inputs=[report_upload, chatbot],
+        inputs=[session_state, report_upload, chatbot],
         outputs=[
+            session_state,
             chatbot,
             question_output,
             progress_output,
@@ -1303,81 +1526,11 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
         js=AUTO_REPORT_DOWNLOAD_JS,
     )
 
-    def respond(message, chat_history):
-        if not message or not message.strip():
-            yield (
-                gr.update(value="", interactive=True, placeholder=get_input_placeholder(chat_history[-1].get("content") if chat_history else None)),
-                clone_chat_history(chat_history),
-                gr.update(),
-                gr.update(),
-                "请输入内容后再发送。",
-                gr.update(),
-                gr.update(),
-                gr.update(interactive=True),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-            )
-            return
-
-        base_history = clone_chat_history(chat_history)
-        pending_history = clone_chat_history(base_history)
-        pending_history.append({"role": "user", "content": message})
-        yield (
-            gr.update(value="", interactive=False),
-            pending_history,
-            gr.update(),
-            gr.update(),
-            "正在解析并生成回复，请稍候...",
-            gr.update(),
-            gr.update(),
-            gr.update(interactive=False),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-        )
-
-        _, updated_chat_history, current_field, progress_text, parse_text, file_path, df = process_user_input(message, base_history)
-        new_messages = updated_chat_history[len(chat_history or []):]
-        assistant_messages = [item for item in new_messages if item.get("role") == "assistant"]
-
-        if not assistant_messages:
-            upload_note, upload_file_update, upload_status_update, upload_path_update, msg_placeholder_update = build_upload_component_updates(current_field)
-            yield (
-                gr.update(value="", interactive=True, **msg_placeholder_update),
-                updated_chat_history,
-                current_field,
-                progress_text,
-                parse_text,
-                file_path,
-                df,
-                gr.update(interactive=True),
-                upload_note,
-                upload_file_update,
-                upload_status_update,
-                upload_path_update,
-                gr.update(),
-            )
-            return
-
-        yield from stream_assistant_messages(
-            pending_history,
-            assistant_messages,
-            current_field,
-            progress_text,
-            parse_text,
-            file_path,
-            df,
-        )
-
     msg.submit(
         fn=respond,
-        inputs=[msg, chatbot],
+        inputs=[session_state, patient_name_input, msg, chatbot],
         outputs=[
+            session_state,
             msg,
             chatbot,
             question_output,
@@ -1395,8 +1548,9 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
     )
     submit_btn.click(
         fn=respond,
-        inputs=[msg, chatbot],
+        inputs=[session_state, patient_name_input, msg, chatbot],
         outputs=[
+            session_state,
             msg,
             chatbot,
             question_output,
