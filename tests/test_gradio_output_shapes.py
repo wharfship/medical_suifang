@@ -11,6 +11,40 @@ from state_tracking import FieldStateTracker
 
 
 class GradioOutputShapeTests(unittest.TestCase):
+    def test_snapshot_session_state_preserves_student_id_and_followup_date(self):
+        original_student_id = getattr(ggg, "ACTIVE_STUDENT_ID", "")
+        original_followup_date = getattr(ggg, "ACTIVE_FOLLOWUP_DATE", "")
+        original_patient_name = ggg.PATIENT_NAME
+        try:
+            ggg.PATIENT_NAME = "李同学"
+            ggg.ACTIVE_STUDENT_ID = "30291834"
+            ggg.ACTIVE_FOLLOWUP_DATE = "2025.06.12"
+
+            state = ggg.snapshot_session_state()
+
+            self.assertEqual(state["patient_name"], "李同学")
+            self.assertEqual(state["student_id"], "30291834")
+            self.assertEqual(state["followup_date"], "2025.06.12")
+        finally:
+            ggg.PATIENT_NAME = original_patient_name
+            ggg.ACTIVE_STUDENT_ID = original_student_id
+            ggg.ACTIVE_FOLLOWUP_DATE = original_followup_date
+
+    def test_download_data_uses_session_followup_date_for_export(self):
+        session_state = ggg.build_session_state("李同学", "30291834")
+        session_state["followup_date"] = "2025.06.12"
+
+        with mock.patch.object(ggg, "export_tracker_data", return_value=(pd.DataFrame(), "medical_data.xlsx")), mock.patch.object(
+            ggg, "persist_followup_export", return_value="fake-output.xlsx"
+        ) as persist_mock, mock.patch("ggg.os.path.exists", return_value=False):
+            output_path = ggg.download_data(session_state, "李同学")
+
+        self.assertEqual(output_path, "fake-output.xlsx")
+        persist_mock.assert_called_once()
+        self.assertEqual(persist_mock.call_args.kwargs["patient_name"], "李同学")
+        self.assertEqual(persist_mock.call_args.kwargs["student_id"], "30291834")
+        self.assertEqual(persist_mock.call_args.kwargs["followup_date"], "2025.06.12")
+
     def test_maybe_finalize_computed_fields_auto_fills_summary_parent_field(self):
         metadata = {
             "（若有糖尿病）药物使用情况": {"描述": "", "示例": "", "依赖": {}},
@@ -172,6 +206,7 @@ class GradioOutputShapeTests(unittest.TestCase):
 
     def test_maybe_finalize_computed_fields_auto_fills_other_history_summary_parent_field(self):
         metadata = {
+            "（若有其余病史）具体疾病名称": {"描述": "", "示例": "", "依赖": {}},
             "（若有其余病史）药物使用情况": {"描述": "", "示例": "", "依赖": {}},
             "（若有其余病史）手术情况": {"描述": "", "示例": "", "依赖": {}},
             "（若有其余病史）目前控制情况": {"描述": "", "示例": "", "依赖": {}},
@@ -183,6 +218,15 @@ class GradioOutputShapeTests(unittest.TestCase):
         ggg.tracker = FieldStateTracker(metadata)
         ggg.chat_history.clear()
         ggg.field_attempts.clear()
+        ggg.tracker.update_field(
+            "（若有其余病史）具体疾病名称",
+            {
+                "status": "done",
+                "completion": "complete",
+                "field_value": "甲亢",
+                "evidence": "patient: 甲亢",
+            },
+        )
         ggg.tracker.update_field(
             "（若有其余病史）药物使用情况",
             {
@@ -218,17 +262,120 @@ class GradioOutputShapeTests(unittest.TestCase):
         self.assertEqual(next_field, "最近一年是否存在手术切口疼痛")
         self.assertEqual(
             ggg.tracker.get_field_value("（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果"),
-            "药物使用情况：甲巯咪唑 10mg，一天两次，一次一片；手术情况：未做过相关手术；目前控制情况：症状较前好转，目前稳定",
+            "具体疾病名称：甲亢；药物使用情况：甲巯咪唑 10mg，一天两次，一次一片；手术情况：未做过相关手术；目前控制情况：症状较前好转，目前稳定",
         )
         self.assertEqual(
             ggg.tracker.filled_data["（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果"]["evidence"],
+            "patient: 甲亢\n"
             "patient: 一直吃甲巯咪唑 10mg，一天两次，一次一片\n"
             "patient: 没做过相关手术\n"
             "patient: 现在症状比之前好一些，基本稳定",
         )
 
+    def test_maybe_finalize_computed_fields_auto_fills_cerebrovascular_summary_with_sequelae(self):
+        metadata = {
+            "（若曾患脑血管病）患病类型": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）药物使用情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）手术情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）后遗症情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）目前控制情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症": {"描述": "", "示例": "", "依赖": {}},
+            "其余病史及用药情况": {"描述": "", "示例": "", "依赖": {}},
+        }
+
+        ggg.metadata = metadata
+        ggg.tracker = FieldStateTracker(metadata)
+        ggg.chat_history.clear()
+        ggg.field_attempts.clear()
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）患病类型",
+            {"status": "done", "completion": "complete", "field_value": "脑梗", "evidence": "patient: 脑梗"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）药物使用情况",
+            {"status": "done", "completion": "complete", "field_value": "阿司匹林 100mg，每天一次", "evidence": "patient: 吃阿司匹林 100mg，每天一次"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）手术情况",
+            {"status": "done", "completion": "complete", "field_value": "未做过相关手术", "evidence": "patient: 没做过手术"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）后遗症情况",
+            {"status": "done", "completion": "complete", "field_value": "遗留左侧肢体活动障碍", "evidence": "patient: 现在左侧肢体活动还有点障碍"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）目前控制情况",
+            {"status": "done", "completion": "complete", "field_value": "目前较前好转", "evidence": "patient: 现在比以前好多了"},
+        )
+
+        with mock.patch.object(ggg, "export_tracker_data", return_value=(pd.DataFrame(), "medical_data.xlsx")):
+            next_field = ggg.maybe_finalize_computed_fields([])
+
+        self.assertEqual(next_field, "其余病史及用药情况")
+        self.assertEqual(
+            ggg.tracker.get_field_value("（若曾患脑血管病）具体疾病、治疗方式及有无后遗症"),
+            "患病类型：脑梗；药物使用情况：阿司匹林 100mg，每天一次；手术情况：未做过相关手术；后遗症情况：遗留左侧肢体活动障碍；目前控制情况：目前较前好转",
+        )
+
+    def test_export_tracker_data_hides_cerebrovascular_sequelae_child_after_parent_summary_generated(self):
+        metadata = {
+            "（若曾患脑血管病）患病类型": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）药物使用情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）手术情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）后遗症情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）目前控制情况": {"描述": "", "示例": "", "依赖": {}},
+            "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症": {"描述": "", "示例": "", "依赖": {}},
+        }
+
+        ggg.metadata = metadata
+        ggg.tracker = FieldStateTracker(metadata)
+        ggg.chat_history.clear()
+        ggg.field_attempts.clear()
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）患病类型",
+            {"status": "done", "completion": "complete", "field_value": "脑梗"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）药物使用情况",
+            {"status": "done", "completion": "complete", "field_value": "阿司匹林 100mg，每天一次"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）手术情况",
+            {"status": "done", "completion": "complete", "field_value": "未做过相关手术"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）后遗症情况",
+            {"status": "done", "completion": "complete", "field_value": "遗留左侧肢体活动障碍"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）目前控制情况",
+            {"status": "done", "completion": "complete", "field_value": "目前较前好转"},
+        )
+        ggg.tracker.update_field(
+            "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症",
+            {
+                "status": "done",
+                "completion": "complete",
+                "field_value": "患病类型：脑梗；药物使用情况：阿司匹林 100mg，每天一次；手术情况：未做过相关手术；后遗症情况：遗留左侧肢体活动障碍；目前控制情况：目前较前好转",
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_base_dir = ggg.BASE_DIR
+            try:
+                ggg.BASE_DIR = Path(temp_dir)
+                with mock.patch.object(ggg, "format_excel", return_value=True):
+                    df, _ = ggg.export_tracker_data()
+            finally:
+                ggg.BASE_DIR = original_base_dir
+
+        exported_fields = df["填写内容"].tolist()
+        self.assertIn("（若曾患脑血管病）具体疾病、治疗方式及有无后遗症", exported_fields)
+        self.assertNotIn("（若曾患脑血管病）后遗症情况", exported_fields)
+
     def test_export_tracker_data_hides_other_history_children_after_parent_summary_generated(self):
         metadata = {
+            "（若有其余病史）具体疾病名称": {"描述": "", "示例": "", "依赖": {}},
             "（若有其余病史）药物使用情况": {"描述": "", "示例": "", "依赖": {}},
             "（若有其余病史）手术情况": {"描述": "", "示例": "", "依赖": {}},
             "（若有其余病史）目前控制情况": {"描述": "", "示例": "", "依赖": {}},
@@ -240,6 +387,15 @@ class GradioOutputShapeTests(unittest.TestCase):
         ggg.tracker = FieldStateTracker(metadata)
         ggg.chat_history.clear()
         ggg.field_attempts.clear()
+        ggg.tracker.update_field(
+            "（若有其余病史）具体疾病名称",
+            {
+                "status": "done",
+                "completion": "complete",
+                "field_value": "甲亢",
+                "evidence": "patient: 甲亢",
+            },
+        )
         ggg.tracker.update_field(
             "（若有其余病史）药物使用情况",
             {
@@ -272,8 +428,8 @@ class GradioOutputShapeTests(unittest.TestCase):
             {
                 "status": "done",
                 "completion": "complete",
-                "field_value": "药物使用情况：甲巯咪唑 10mg，一天两次，一次一片；手术情况：未做过相关手术；目前控制情况：症状较前好转，目前稳定",
-                "evidence": "patient: 一直吃甲巯咪唑 10mg，一天两次，一次一片\npatient: 没做过相关手术\npatient: 现在症状比之前好一些，基本稳定",
+                "field_value": "具体疾病名称：甲亢；药物使用情况：甲巯咪唑 10mg，一天两次，一次一片；手术情况：未做过相关手术；目前控制情况：症状较前好转，目前稳定",
+                "evidence": "patient: 甲亢\npatient: 一直吃甲巯咪唑 10mg，一天两次，一次一片\npatient: 没做过相关手术\npatient: 现在症状比之前好一些，基本稳定",
             },
         )
 
@@ -288,6 +444,7 @@ class GradioOutputShapeTests(unittest.TestCase):
 
         exported_fields = df["填写内容"].tolist()
         self.assertIn("（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果", exported_fields)
+        self.assertNotIn("（若有其余病史）具体疾病名称", exported_fields)
         self.assertNotIn("（若有其余病史）药物使用情况", exported_fields)
         self.assertNotIn("（若有其余病史）手术情况", exported_fields)
         self.assertNotIn("（若有其余病史）目前控制情况", exported_fields)

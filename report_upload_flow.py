@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 from lab_report_extractor import export_rows_to_xlsx, extract_lab_items_from_file
-from medical_output_flow import DEFAULT_PATIENT_NAME, ensure_patient_output_dir
+from medical_output_flow import DEFAULT_PATIENT_NAME, DEFAULT_STUDENT_ID, ensure_patient_output_dir
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -32,6 +32,7 @@ def run_report_upload_flow(
     output_dir=OUTPUT_DIR,
     patient_name=DEFAULT_PATIENT_NAME,
     patient_output_dir=None,
+    student_id=DEFAULT_STUDENT_ID,
     field_name=None,
 ):
     status, output_path, _ = run_report_upload_flow_with_rows(
@@ -39,6 +40,7 @@ def run_report_upload_flow(
         output_dir=output_dir,
         patient_name=patient_name,
         patient_output_dir=patient_output_dir,
+        student_id=student_id,
         field_name=field_name,
     )
     return status, output_path
@@ -49,6 +51,7 @@ def save_report_file_only(
     output_dir=OUTPUT_DIR,
     patient_name=DEFAULT_PATIENT_NAME,
     patient_output_dir=None,
+    student_id=DEFAULT_STUDENT_ID,
     field_name=None,
 ):
     if not file_path:
@@ -59,6 +62,7 @@ def save_report_file_only(
         output_dir=output_dir,
         patient_name=patient_name,
         patient_output_dir=patient_output_dir,
+        student_id=student_id,
     )
 
     saved_source_path = build_saved_source_path(submission_dir, source_path, field_name=field_name)
@@ -71,6 +75,7 @@ def run_report_upload_flow_with_rows(
     output_dir=OUTPUT_DIR,
     patient_name=DEFAULT_PATIENT_NAME,
     patient_output_dir=None,
+    student_id=DEFAULT_STUDENT_ID,
     field_name=None,
 ):
     if not file_path:
@@ -81,6 +86,7 @@ def run_report_upload_flow_with_rows(
         output_dir=output_dir,
         patient_name=patient_name,
         patient_output_dir=patient_output_dir,
+        student_id=student_id,
     )
 
     saved_source_path = build_saved_source_path(submission_dir, source_path, field_name=field_name)

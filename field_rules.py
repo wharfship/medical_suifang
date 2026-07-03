@@ -37,10 +37,11 @@ DURATION_FIELDS = {
 }
 PAIN_SCORE_FIELDS = {"（若存在手术切口疼痛）疼痛程度评分"}
 TEXT_COMPLETE_FIELDS = {
-    "其余病史及用药情况",
     "尿常规：尿蛋白、尿潜血",
     "肾脏彩超",
 }
+DIAGNOSIS_TEXT_FIELDS = {"（若有其余病史）具体疾病名称"}
+OTHER_HISTORY_GATE_FIELD = "其余病史及用药情况"
 
 STRICT_COMPLEX_FIELDS = {
     "（若有高血压）药物控制方案",
@@ -102,9 +103,14 @@ FIELD_RULES = {
         "followup_focus": "优先补最核心的药物或控制情况。",
     },
     "其余病史及用药情况": {
-        "minimum_requirement": "患者明确回答了已诊断出的具体疾病才可填写疾病名，如果患者只说症状或特征，按无病史处理填写“无”即可；",
-        "accepted_examples": ["无", "腰间盘突出", "脑梗"],
-        "followup_focus": "若只回答“有”但没说具体病名，才继续追问是什么具体疾病;如果识别到“咳嗽、头疼、发烧、难受”这类症状词,不要当成有效病史，继续追问或按无病史(填写“无”)处理",
+        "minimum_requirement": "这里只判断除高血压、糖尿病、冠心病、脑血管病外，是否还有其他明确诊断疾病；只接受“是/否/未知”或能明确推出“是”的回答。",
+        "accepted_examples": ["有", "无", "甲减"],
+        "followup_focus": "优先把入口判断收束成是/否/未知；若患者直接说出疾病名，可判为“是”，再单独追问具体疾病名称。",
+    },
+    "（若有其余病史）具体疾病名称": {
+        "minimum_requirement": "需要记录明确诊断名称，只接受疾病名，不接受头晕、咳嗽、难受这类症状描述。",
+        "accepted_examples": ["甲减", "慢阻肺", "腰椎间盘突出"],
+        "followup_focus": "如果患者只说症状，需要继续追问医院明确诊断的疾病名称。",
     },
 
     "近一年是否存在手术切口疼痛": {
@@ -147,6 +153,20 @@ NEGATIVE_MEDICATION_PATTERN = re.compile(r"(没吃药|未用药|没有用药|没
 INSULIN_PATTERN = re.compile(r"(胰岛素)")
 SURGERY_PATTERN = re.compile(r"(手术|支架|搭桥|介入|开刀)")
 NEGATIVE_SURGERY_PATTERN = re.compile(r"(没做手术|未手术)")
+MEDICATION_NAME_PATTERN = re.compile(
+    r"(硝苯地平|氨氯地平|缬沙坦|厄贝沙坦|替米沙坦|二甲双胍|阿卡波糖|达格列净|"
+    r"阿司匹林|氯吡格雷|阿托伐他汀|甲巯咪唑|优甲乐|甘精胰岛素|门冬胰岛素|赖脯胰岛素|地特胰岛素|德谷胰岛素)"
+)
+SEQUELAE_DETAIL_PATTERN = re.compile(r"(肢体活动障碍|活动障碍|感觉障碍|言语障碍|说话不清|口齿不清|偏瘫|麻木)")
+MEDICATION_SPEC_PATTERN = re.compile(r"\d+\s*(mg|毫克|g|克|ug|微克|个单位|单位|u|U)")
+MEDICATION_FREQUENCY_PATTERN = re.compile(r"((一天|每日|每天|每晚|每早).{0,6}(次|回))")
+DIAGNOSIS_PATTERN = re.compile(
+    r"(甲减|甲亢|甲状腺|哮喘|痛风|乙肝|丙肝|肝硬化|慢阻肺|肺气肿|结石|腰椎间盘突出|腰间盘突出|"
+    r"骨质疏松|贫血|类风湿|风湿|肾病|肾炎|肿瘤|癌|冠脉|脑梗|脑出血|抑郁|焦虑|癫痫|帕金森|"
+    r"肺炎|胃炎|胃溃疡|胆囊炎|胆结石|前列腺增生|白内障|青光眼|银屑病|湿疹|荨麻疹|强直性脊柱炎|桥本|腺瘤)"
+)
+DISEASE_SUFFIX_PATTERN = re.compile(r"(病|炎|癌|综合征|结节|囊肿|增生|硬化|狭窄|梗死|梗塞|损伤|异常|功能减退|功能亢进)")
+SYMPTOM_PATTERN = re.compile(r"(头晕|头疼|头痛|咳嗽|发烧|发热|胸闷|难受|恶心|呕吐|疼|麻|酸|胀|乏力|没劲|不舒服|气短)")
 
 
 def _clean_text(value):
@@ -172,12 +192,16 @@ def _normalize_yes_no(value):
     if not text:
         return ""
 
+    if re.search(r"(不知道|不清楚|记不清|忘了|不确定|说不准|应该)", text):
+        return "未知"
+    if text in {"有", "是", "患过", "得过", "出现过", "阳性"}:
+        return "是"
+    if text in {"无", "否", "没有", "未患", "未出现", "阴性"}:
+        return "否"
     if re.search(r"(没有|无|否认|不是|未患|未出现|没发生|阴性|正常)", text):
         return "否"
     if re.search(r"(有|是|患过|得过|出现过|疼过|阳性)", text):
         return "是"
-    if re.search(r"(不知道|不清楚|记不清|忘了|不确定|说不准|应该)", text):
-        return "未知"
     if text in {"是", "否", "未知"}:
         return text
     return text
@@ -277,6 +301,19 @@ def _is_specific_text(value):
     return len(text) >= 2
 
 
+def _looks_like_specific_diagnosis(value):
+    text = _clean_text(value)
+    if not text or text in GENERIC_SHORT_ANSWERS:
+        return False
+    if _normalize_yes_no(text) in {"是", "否", "未知"}:
+        return False
+    if DIAGNOSIS_PATTERN.search(text) or DISEASE_SUFFIX_PATTERN.search(text):
+        return True
+    if SYMPTOM_PATTERN.search(text):
+        return False
+    return False
+
+
 def _contains_unknown(text):
     return bool(UNKNOWN_PATTERN.search(_clean_text(text)))
 
@@ -310,6 +347,26 @@ def _mentions_insulin(text):
     return bool(INSULIN_PATTERN.search(_clean_text(text)))
 
 
+def _count_medication_mentions(text):
+    return len(set(MEDICATION_NAME_PATTERN.findall(_clean_text(text))))
+
+
+def _has_multiple_medications(text):
+    return _count_medication_mentions(text) >= 2
+
+
+def _mentions_sequelae_detail(text):
+    return bool(SEQUELAE_DETAIL_PATTERN.search(_clean_text(text)))
+
+
+def _count_medication_specs(text):
+    return len(MEDICATION_SPEC_PATTERN.findall(_clean_text(text)))
+
+
+def _count_medication_frequencies(text):
+    return len(MEDICATION_FREQUENCY_PATTERN.findall(_clean_text(text)))
+
+
 def _mentions_surgery(text):
     clean = _clean_text(text)
     return bool(SURGERY_PATTERN.search(clean)) and not bool(NEGATIVE_SURGERY_PATTERN.search(clean))
@@ -337,16 +394,18 @@ def _evaluate_hypertension_medication_slots(text):
         })
     else:
         _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    slots["dose_each_time"] = "not_applicable"
     return slots
 
 
 def _evaluate_diabetes_medication_slots(text):
     slots = {
         "control_level": _slot_status_from_patterns(text, [r"(血糖|空腹血糖|\d+(?:\.\d+)?)"], ["血糖", "空腹血糖"]),
+        "multiple_medications": "answered" if _has_multiple_medications(text) else "not_applicable",
     }
     if _mentions_medication(text):
         slots.update({
-            "drug_name": _slot_status_from_patterns(text, [r"(二甲双胍|阿卡波糖|达格列净|降糖药)"], ["药", "药物"]),
+            "drug_name": _slot_status_from_patterns(text, [r"(二甲双胍|阿卡波糖|达格列净|降糖药|胰岛素)"], ["药", "药物"]),
             "spec": _slot_status_from_patterns(text, [r"\d+\s*(mg|毫克|g|克)"], ["规格", "mg", "毫克"]),
             "frequency": _slot_status_from_patterns(text, [r"(一天|每日|每天).{0,6}(次|回)"], ["次数", "频次", "一天", "每天"]),
             "dose_each_time": _slot_status_from_patterns(text, [r"(一次|每次).{0,8}(片|粒|颗)"], ["一次", "每次", "几片", "几粒"]),
@@ -356,12 +415,18 @@ def _evaluate_diabetes_medication_slots(text):
 
     if _mentions_insulin(text):
         slots.update({
-            "insulin_name": _slot_status_from_patterns(text, [r"(甘精胰岛素|门冬胰岛素|胰岛素)"], ["胰岛素"]),
+            "insulin_name": _slot_status_from_patterns(text, [r"(甘精胰岛素|门冬胰岛素|赖脯胰岛素|地特胰岛素|德谷胰岛素|胰岛素)"], ["胰岛素"]),
             "injection_time": _slot_status_from_patterns(text, [r"(早上|中午|晚上|饭前|饭后|睡前)"], ["时间", "什么时候", "早上", "晚上"]),
             "injection_units": _slot_status_from_patterns(text, [r"\d+\s*(个单位|u|U)"], ["单位"]),
         })
     else:
         _mark_not_applicable(slots, {"insulin_name", "injection_time", "injection_units"})
+    if _has_multiple_medications(text):
+        required_items = _count_medication_mentions(text)
+        if _count_medication_specs(text) < required_items:
+            slots["spec"] = "missing"
+        if _count_medication_frequencies(text) < required_items:
+            slots["frequency"] = "missing"
     return slots
 
 
@@ -391,6 +456,7 @@ def _evaluate_coronary_treatment_slots(text):
         })
     else:
         _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    slots["dose_each_time"] = "not_applicable"
     return slots
 
 
@@ -401,7 +467,10 @@ def _evaluate_cerebrovascular_treatment_slots(text):
         "symptom_improved": _slot_status_from_patterns(text, [r"(好转|好多了|缓解|仍然|改善)"]),
         "recurred": _slot_status_from_patterns(text, [r"(再犯|再发|没再犯|没有再犯)"]),
         "sequelae": _slot_status_from_patterns(text, [r"(后遗症|没有后遗症|遗留)"]),
+        "sequelae_detail": "answered" if _mentions_sequelae_detail(text) else "missing",
     }
+    if slots["sequelae"] == "answered" and re.search(r"(没有后遗症|无后遗症)", text):
+        slots["sequelae_detail"] = "not_applicable"
     if slots["treatment_type"] == "missing" and (_mentions_surgery(text) or _mentions_medication(text)):
         slots["treatment_type"] = "answered"
     if _mentions_surgery(text):
@@ -421,6 +490,7 @@ def _evaluate_cerebrovascular_treatment_slots(text):
         })
     else:
         _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    slots["dose_each_time"] = "not_applicable"
     return slots
 
 
@@ -450,18 +520,33 @@ def _evaluate_other_history_treatment_slots(text):
         })
     else:
         _mark_not_applicable(slots, {"drug_name", "spec", "frequency", "dose_each_time"})
+    slots["dose_each_time"] = "not_applicable"
     return slots
 
 
 def _finalize_strict_complex_result(result, slots, note):
     adjusted = dict(result)
-    if _has_status(slots, "missing"):
+    if _has_status(slots, "missing") or _has_status(slots, "unknown"):
         adjusted["status"] = "ask_again"
         adjusted["completion"] = "partial" if _clean_text(adjusted.get("field_value")) else "empty"
     else:
         adjusted["status"] = "done"
         adjusted["completion"] = "complete"
     return _append_reason(adjusted, note)
+
+
+def _evaluate_field_slots(field, text):
+    if field == "（若有高血压）药物控制方案":
+        return _evaluate_hypertension_medication_slots(text), "按高血压药物控制方案字段规则收束。"
+    if field == "（若有糖尿病）药物控制方案":
+        return _evaluate_diabetes_medication_slots(text), "按糖尿病药物控制方案字段规则收束。"
+    if field == "（若曾患冠心病）治疗方式":
+        return _evaluate_coronary_treatment_slots(text), "按冠心病治疗方式字段规则收束。"
+    if field == "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症":
+        return _evaluate_cerebrovascular_treatment_slots(text), "按脑血管病治疗方式字段规则收束。"
+    if field == "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果":
+        return _evaluate_other_history_treatment_slots(text), "按其余病史详情字段规则收束。"
+    return None, None
 
 
 
@@ -558,14 +643,33 @@ def apply_field_completion_rules(field, result):
             return _append_reason(adjusted, "按疼痛评分字段规则收束。")
         return adjusted
 
-    if field in TEXT_COMPLETE_FIELDS:
-        normalized = _normalize_yes_no(value) if field == "其余病史及用药情况" else value
-        if field == "其余病史及用药情况" and normalized in {"否", "无","未知","没有"}:
+    if field in STRICT_COMPLEX_FIELDS:
+        slots, note = _evaluate_field_slots(field, value)
+        if slots is not None:
+            return _finalize_strict_complex_result(adjusted, slots, note)
+
+    if field == OTHER_HISTORY_GATE_FIELD:
+        normalized = _normalize_yes_no(value)
+        if normalized in {"是", "否", "未知"}:
             adjusted["field_value"] = normalized
             adjusted["status"] = "done"
             adjusted["completion"] = "complete"
-            return _append_reason(adjusted, "按其余病史字段规则收束。")
+            return _append_reason(adjusted, "按其余病史入口字段规则收束。")
+        if _looks_like_specific_diagnosis(value):
+            adjusted["field_value"] = "是"
+            adjusted["status"] = "done"
+            adjusted["completion"] = "complete"
+            return _append_reason(adjusted, "患者直接回答了明确诊断名，按其余病史存在处理。")
+        return adjusted
 
+    if field in DIAGNOSIS_TEXT_FIELDS:
+        if _looks_like_specific_diagnosis(value):
+            adjusted["status"] = "done"
+            adjusted["completion"] = "complete"
+            return _append_reason(adjusted, "按明确诊断名称字段规则收束。")
+        return adjusted
+
+    if field in TEXT_COMPLETE_FIELDS:
         if _is_specific_text(value):
             adjusted["status"] = "done"
             adjusted["completion"] = "complete"

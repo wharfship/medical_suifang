@@ -42,6 +42,8 @@ DEFAULT_MAX_ATTEMPTS = {
     "（若曾患冠心病）治疗方式": 4,
     "（若曾患脑血管病）具体疾病、治疗方式及有无后遗症": 4,
     "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果": 4,
+    "（若曾患脑血管病）后遗症情况": 2,
+    "（若有其余病史）具体疾病名称": 2,
 }
 
 HOSPITAL_CHECK_GATE_FIELD = "请问您最近有去医院进行检查吗？"
@@ -52,6 +54,34 @@ HOSPITAL_CHECK_CHILD_FIELDS = (
 )
 FIELD_EXAMPLE_OVERRIDES = {
     "随访时受者状态": "请告诉我最近一次检查中您的受者状态。A:移植肾功能正常（在检查医院肌酐指标的正常范围内）  B:移植肾功能不全（高于检查医院肌酐指标的正常范围） C:恢复透析（受者恢复透析状态） D：受者死亡",
+    "（若有糖尿病）胰岛素使用情况": "请问您现在是否使用胰岛素？如果使用，具体是哪一种胰岛素，比如甘精胰岛素、门冬胰岛素？通常一天打几次、每次多少单位？",
+    "（若曾患脑血管病）后遗症情况": "请问目前还有没有后遗症？比如肢体活动障碍、感觉障碍、说话不清这些情况。",
+    "其余病史及用药情况": "除高血压、糖尿病、冠心病、脑血管病外，是否还有其他明确诊断的疾病？请直接回答有、没有或不清楚。",
+    "（若有其余病史）具体疾病名称": "请问具体是什么病？请说明确诊断名称，比如甲减、慢阻肺、腰椎间盘突出，不要只说头晕、咳嗽这类症状。",
+}
+
+FIELD_DESCRIPTION_OVERRIDES = {
+    "（若有糖尿病）胰岛素使用情况": "询问是否使用胰岛素；若使用，需要先确认胰岛素具体名称，再记录注射频次和每次单位数，以区分长效、短效等不同类型。",
+    "（若曾患脑血管病）后遗症情况": "单独记录脑血管病后遗症情况；需要明确是否遗留后遗症，以及是否存在肢体活动障碍、感觉障碍、言语障碍等。",
+    "其余病史及用药情况": "仅作为其他病史入口判断，确认除高血压、糖尿病、冠心病、脑血管病外，是否还有其他明确诊断疾病；此字段只记录是、否或未知。",
+    "（若有其余病史）具体疾病名称": "记录其他病史的明确诊断名称，只接受疾病名，不接受头晕、咳嗽、难受这类症状描述。",
+}
+
+RUNTIME_INSERTED_FIELDS = {
+    "（若曾患脑血管病）后遗症情况": {
+        "anchor": "（若曾患脑血管病）手术情况",
+        "description": FIELD_DESCRIPTION_OVERRIDES["（若曾患脑血管病）后遗症情况"],
+        "example": FIELD_EXAMPLE_OVERRIDES["（若曾患脑血管病）后遗症情况"],
+        "dependencies": {'parent': '是否曾患脑血管病', 'condition': ['是']},
+        "max_attempts": DEFAULT_MAX_ATTEMPTS["（若曾患脑血管病）后遗症情况"],
+    },
+    "（若有其余病史）具体疾病名称": {
+        "anchor": "（若有其余病史）药物使用情况",
+        "description": FIELD_DESCRIPTION_OVERRIDES["（若有其余病史）具体疾病名称"],
+        "example": FIELD_EXAMPLE_OVERRIDES["（若有其余病史）具体疾病名称"],
+        "dependencies": {'parent': '其余病史及用药情况', 'condition': ['是']},
+        "max_attempts": DEFAULT_MAX_ATTEMPTS["（若有其余病史）具体疾病名称"],
+    },
 }
 
 
@@ -79,7 +109,7 @@ def extract_dependencies(field):
             if pattern_str == "若曾患脑血管病":
                 dependencies = {'parent': '是否曾患脑血管病', 'condition':['是']}
             if pattern_str == "若有其余病史":
-                dependencies = {'parent': '其余病史及用药情况', 'opposite_condition': ['否','未知']}
+                dependencies = {'parent': '其余病史及用药情况', 'condition': ['是']}
             if pattern_str == "若存在手术切口疼痛":
                 dependencies = {'parent': '近一年是否存在手术切口疼痛', 'condition': ['是']}
                 break  # 找到匹配后退出循环
@@ -119,11 +149,40 @@ def load_excel_template(file_path):
             max_attempts = DEFAULT_MAX_ATTEMPTS.get(field, 4)
 
         field_info[field] = {
-            '描述': description,
+            '描述': FIELD_DESCRIPTION_OVERRIDES.get(field, description),
             '示例': FIELD_EXAMPLE_OVERRIDES.get(field, example),
             '依赖': dependencies,
             '追问上限': max_attempts
         }
+
+    if RUNTIME_INSERTED_FIELDS:
+        ordered_items = list(field_info.items())
+        for field, config in RUNTIME_INSERTED_FIELDS.items():
+            if field in field_info:
+                field_info[field]['描述'] = FIELD_DESCRIPTION_OVERRIDES.get(field, field_info[field]['描述'])
+                field_info[field]['示例'] = FIELD_EXAMPLE_OVERRIDES.get(field, field_info[field]['示例'])
+                field_info[field]['依赖'] = config['dependencies']
+                field_info[field]['追问上限'] = config['max_attempts']
+                continue
+
+            insert_at = len(ordered_items)
+            anchor = config.get("anchor")
+            if anchor:
+                for index, (name, _) in enumerate(ordered_items):
+                    if name == anchor:
+                        insert_at = index + 1
+                        break
+
+            ordered_items.insert(insert_at, (
+                field,
+                {
+                    '描述': config['description'],
+                    '示例': config['example'],
+                    '依赖': config['dependencies'],
+                    '追问上限': config['max_attempts'],
+                }
+            ))
+        field_info = dict(ordered_items)
 
     if all(field in field_info for field in HOSPITAL_CHECK_CHILD_FIELDS):
         ordered_items = list(field_info.items())

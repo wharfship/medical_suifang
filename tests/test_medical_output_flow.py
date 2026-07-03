@@ -1,10 +1,18 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
-from medical_output_flow import ensure_patient_output_dir, persist_followup_export
+from medical_output_flow import (
+    build_followup_result_dirname,
+    build_patient_storage_name,
+    ensure_patient_output_dir,
+    persist_followup_export,
+)
 
 PATIENT_NAME = "\u674e\u540c\u5b66"
+STUDENT_ID = "30291834"
+FOLLOWUP_DATE = "2025.06.12"
 
 
 class MedicalOutputPersistenceTests(unittest.TestCase):
@@ -25,11 +33,17 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 output_dir=output_dir,
                 uploaded_report_path=uploaded_report_path,
                 patient_name=patient_name,
+                student_id=STUDENT_ID,
+                followup_date=FOLLOWUP_DATE,
             )
 
             submission_dir = os.path.dirname(output_path)
             copied_report_path = os.path.join(submission_dir, "report.pdf")
-            expected_dir = os.path.join(output_dir, patient_name)
+            expected_dir = os.path.join(
+                output_dir,
+                build_patient_storage_name(patient_name, STUDENT_ID),
+                build_followup_result_dirname(FOLLOWUP_DATE),
+            )
 
             self.assertTrue(os.path.exists(output_path))
             self.assertTrue(os.path.isdir(submission_dir))
@@ -52,6 +66,8 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 output_dir=output_dir,
                 uploaded_report_path=os.path.join(temp_dir, "missing.xlsx"),
                 patient_name=PATIENT_NAME,
+                student_id=STUDENT_ID,
+                followup_date=FOLLOWUP_DATE,
             )
 
             self.assertTrue(os.path.exists(output_path))
@@ -61,9 +77,21 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = os.path.join(temp_dir, "outputs")
 
-            patient_output_dir = ensure_patient_output_dir(output_dir=output_dir, patient_name=PATIENT_NAME)
+            patient_output_dir = ensure_patient_output_dir(
+                output_dir=output_dir,
+                patient_name=PATIENT_NAME,
+                student_id=STUDENT_ID,
+                followup_date=FOLLOWUP_DATE,
+            )
 
-            self.assertEqual(str(patient_output_dir), os.path.join(output_dir, PATIENT_NAME))
+            self.assertEqual(
+                str(patient_output_dir),
+                os.path.join(
+                    output_dir,
+                    build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
+                    build_followup_result_dirname(FOLLOWUP_DATE),
+                ),
+            )
             self.assertTrue(os.path.isdir(str(patient_output_dir)))
 
     def test_persist_followup_export_overwrites_existing_files_in_patient_folder(self):
@@ -71,7 +99,11 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
             source_excel_path = os.path.join(temp_dir, "medical_data.xlsx")
             uploaded_report_path = os.path.join(temp_dir, "report.pdf")
             output_dir = os.path.join(temp_dir, "outputs")
-            patient_output_dir = os.path.join(output_dir, PATIENT_NAME)
+            patient_output_dir = os.path.join(
+                output_dir,
+                build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
+                build_followup_result_dirname(FOLLOWUP_DATE),
+            )
 
             with open(source_excel_path, "wb") as handle:
                 handle.write(b"first-excel")
@@ -83,6 +115,8 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 output_dir=output_dir,
                 uploaded_report_path=uploaded_report_path,
                 patient_name=PATIENT_NAME,
+                student_id=STUDENT_ID,
+                followup_date=FOLLOWUP_DATE,
             )
 
             with open(source_excel_path, "wb") as handle:
@@ -95,6 +129,8 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 output_dir=output_dir,
                 uploaded_report_path=uploaded_report_path,
                 patient_name=PATIENT_NAME,
+                student_id=STUDENT_ID,
+                followup_date=FOLLOWUP_DATE,
             )
 
             self.assertEqual(os.path.dirname(first_output_path), patient_output_dir)

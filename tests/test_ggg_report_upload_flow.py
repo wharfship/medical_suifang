@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from unittest.mock import patch
 
 import gradio as gr
@@ -196,7 +196,7 @@ class ReportUploadAdvanceTests(unittest.TestCase):
         save_only_mock.assert_called_once()
         args, kwargs = save_only_mock.call_args
         self.assertEqual(os.path.normpath(args[0]), os.path.normpath("C:/temp/ultrasound.jpg"))
-        self.assertEqual(kwargs, {"patient_name": ggg.PATIENT_NAME, "field_name": "肾脏彩超"})
+        self.assertEqual(kwargs, {"patient_name": ggg.PATIENT_NAME, "student_id": "", "field_name": "肾脏彩超"})
         self.assertEqual(status, "上传完成，已用于当前题：肾脏彩超")
         self.assertEqual(saved_path, "C:/outputs/李同学/ultrasound.jpg")
         self.assertIsNone(download_path)

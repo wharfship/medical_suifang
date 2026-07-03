@@ -18,9 +18,11 @@ from lab_report_extractor import (
     normalize_extracted_items,
     parse_model_response,
 )
+from medical_output_flow import build_followup_result_dirname, build_patient_storage_name
 from report_upload_flow import build_field_artifact_stem, run_report_upload_flow, save_report_file_only
 
 PATIENT_NAME = "\u674e\u540c\u5b66"
+STUDENT_ID = "30291834"
 
 
 class FakeMessage:
@@ -437,6 +439,7 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
                     source_path,
                     output_dir=output_dir,
                     patient_name=patient_name,
+                    student_id=STUDENT_ID,
                     field_name="血生化：血清肌酐",
                 )
 
@@ -444,7 +447,14 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
             submission_dir = os.path.dirname(output_path)
             copied_input_path = os.path.join(submission_dir, "血生化_血清肌酐.jpg")
             self.assertTrue(os.path.isdir(submission_dir))
-            self.assertEqual(submission_dir, os.path.join(output_dir, patient_name))
+            self.assertEqual(
+                submission_dir,
+                os.path.join(
+                    output_dir,
+                    build_patient_storage_name(patient_name, STUDENT_ID),
+                    build_followup_result_dirname(),
+                ),
+            )
             self.assertTrue(os.path.exists(copied_input_path))
             self.assertEqual(os.path.basename(output_path), "血生化_血清肌酐_提取结果.xlsx")
             with open(copied_input_path, "rb") as handle:
@@ -475,6 +485,7 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
                     source_path,
                     output_dir=output_dir,
                     patient_name=PATIENT_NAME,
+                    student_id=STUDENT_ID,
                 )
 
             with open(source_path, "wb") as handle:
@@ -485,6 +496,7 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
                     source_path,
                     output_dir=output_dir,
                     patient_name=PATIENT_NAME,
+                    student_id=STUDENT_ID,
                 )
 
             self.assertEqual(os.path.dirname(first_output_path), os.path.dirname(second_output_path))
@@ -506,7 +518,11 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = os.path.join(temp_dir, "outputs")
-            patient_output_dir = os.path.join(output_dir, PATIENT_NAME)
+            patient_output_dir = os.path.join(
+                output_dir,
+                build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
+                build_followup_result_dirname(),
+            )
             source_path = os.path.join(temp_dir, "input.jpg")
             with open(source_path, "wb") as handle:
                 handle.write(b"fake-image")
@@ -531,14 +547,31 @@ class ExtractDemoOutputPersistenceTests(unittest.TestCase):
                 source_path,
                 output_dir=output_dir,
                 patient_name=PATIENT_NAME,
+                student_id=STUDENT_ID,
                 field_name="肾脏彩超",
             )
 
             self.assertEqual(status, "上传完成")
             self.assertTrue(os.path.exists(saved_path))
-            self.assertEqual(os.path.dirname(saved_path), os.path.join(output_dir, PATIENT_NAME))
+            self.assertEqual(
+                os.path.dirname(saved_path),
+                os.path.join(
+                    output_dir,
+                    build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
+                    build_followup_result_dirname(),
+                ),
+            )
             self.assertEqual(os.path.basename(saved_path), "肾脏彩超.jpg")
-            self.assertFalse(os.path.exists(os.path.join(output_dir, PATIENT_NAME, "lab_extract_result.xlsx")))
+            self.assertFalse(
+                os.path.exists(
+                    os.path.join(
+                        output_dir,
+                        build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
+                        build_followup_result_dirname(),
+                        "lab_extract_result.xlsx",
+                    )
+                )
+            )
 
 
 if __name__ == "__main__":

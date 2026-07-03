@@ -14,7 +14,7 @@ from field_rules import (
     apply_field_completion_rules,
 )
 from lab_report_extractor import extract_followup_value_from_rows
-from medical_output_flow import DEFAULT_PATIENT_NAME, OUTPUT_DIR, persist_followup_export
+from medical_output_flow import DEFAULT_PATIENT_NAME, OUTPUT_DIR, build_patient_storage_name, persist_followup_export
 from report_upload_flow import run_report_upload_flow_with_rows, save_report_file_only
 from workflow_status import (
     finalize_after_attempt_limit,
@@ -24,6 +24,7 @@ from workflow_status import (
 )
 
 FILE_NAME = "子问题.xls"
+FOLLOWUP_DATE = ""
 BASE_DIR = Path(__file__).resolve().parent
 excel_path = BASE_DIR / FILE_NAME
 if not excel_path.exists():
@@ -34,6 +35,8 @@ field_attempts = {}
 chat_history = []   # 专门给 gradio 的 Chatbot 用的
 last_report_output_path = ""
 PATIENT_NAME = DEFAULT_PATIENT_NAME
+ACTIVE_STUDENT_ID = ""
+ACTIVE_FOLLOWUP_DATE = ""
 CURRENT_WORKING_DIR = BASE_DIR
 SESSION_WORK_ROOT = OUTPUT_DIR / "_sessions"
 SESSION_LOCK = threading.RLock()
@@ -72,9 +75,11 @@ COMPUTED_SUMMARY_FIELDS = {
         ("患病类型", "（若曾患脑血管病）患病类型"),
         ("药物使用情况", "（若曾患脑血管病）药物使用情况"),
         ("手术情况", "（若曾患脑血管病）手术情况"),
+        ("后遗症情况", "（若曾患脑血管病）后遗症情况"),
         ("目前控制情况", "（若曾患脑血管病）目前控制情况"),
     ],
     "（若有其余病史）请描述具体疾病、治疗方式、用药种类、用法、治疗效果": [
+        ("具体疾病名称", "（若有其余病史）具体疾病名称"),
         ("药物使用情况", "（若有其余病史）药物使用情况"),
         ("手术情况", "（若有其余病史）手术情况"),
         ("目前控制情况", "（若有其余病史）目前控制情况"),
@@ -94,21 +99,24 @@ def sanitize_path_fragment(value, fallback="session"):
     return text or fallback
 
 
-def create_session_working_dir(patient_name):
+def create_session_working_dir(patient_name, student_id=""):
     SESSION_WORK_ROOT.mkdir(parents=True, exist_ok=True)
-    safe_name = sanitize_path_fragment(patient_name, fallback="patient")
+    safe_name = sanitize_path_fragment(build_patient_storage_name(patient_name, student_id), fallback="patient")
     session_id = uuid.uuid4().hex[:8]
     session_dir = SESSION_WORK_ROOT / f"{safe_name}_{session_id}"
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
 
 
-def build_session_state(patient_name=None):
+def build_session_state(patient_name=None, student_id=""):
     normalized_name = normalize_patient_name(patient_name)
     session_metadata = load_excel_template(excel_path)
-    working_dir = create_session_working_dir(normalized_name)
+    normalized_student_id = str(student_id or "").strip()
+    working_dir = create_session_working_dir(normalized_name, normalized_student_id)
     return {
         "patient_name": normalized_name,
+        "student_id": normalized_student_id,
+        "followup_date": "",
         "metadata": session_metadata,
         "tracker": FieldStateTracker(session_metadata),
         "field_attempts": {},
@@ -119,10 +127,12 @@ def build_session_state(patient_name=None):
 
 
 def apply_session_state(session_state=None, patient_name=None, session_scoped=False):
-    global tracker, metadata, field_attempts, chat_history, last_report_output_path, PATIENT_NAME, CURRENT_WORKING_DIR, SESSION_SCOPED_RUNTIME
+    global tracker, metadata, field_attempts, chat_history, last_report_output_path, PATIENT_NAME, ACTIVE_STUDENT_ID, ACTIVE_FOLLOWUP_DATE, CURRENT_WORKING_DIR, SESSION_SCOPED_RUNTIME
 
     active_state = session_state or build_session_state(patient_name)
     active_state["patient_name"] = normalize_patient_name(patient_name or active_state.get("patient_name"))
+    active_state["student_id"] = str(active_state.get("student_id") or "").strip()
+    active_state["followup_date"] = str(active_state.get("followup_date") or "").strip()
     active_state["metadata"] = active_state.get("metadata") or load_excel_template(excel_path)
     active_state["tracker"] = active_state.get("tracker") or FieldStateTracker(active_state["metadata"])
     active_state["field_attempts"] = active_state.get("field_attempts") or {}
@@ -131,7 +141,7 @@ def apply_session_state(session_state=None, patient_name=None, session_scoped=Fa
     SESSION_SCOPED_RUNTIME = bool(session_scoped)
 
     if SESSION_SCOPED_RUNTIME:
-        working_dir = Path(active_state.get("working_dir") or create_session_working_dir(active_state["patient_name"]))
+        working_dir = Path(active_state.get("working_dir") or create_session_working_dir(active_state["patient_name"], active_state["student_id"]))
         working_dir.mkdir(parents=True, exist_ok=True)
         active_state["working_dir"] = str(working_dir)
     else:
@@ -144,6 +154,8 @@ def apply_session_state(session_state=None, patient_name=None, session_scoped=Fa
     chat_history = active_state["chat_history"]
     last_report_output_path = active_state["last_report_output_path"]
     PATIENT_NAME = active_state["patient_name"]
+    ACTIVE_STUDENT_ID = active_state["student_id"]
+    ACTIVE_FOLLOWUP_DATE = active_state["followup_date"]
     CURRENT_WORKING_DIR = working_dir
     return active_state
 
@@ -151,6 +163,8 @@ def apply_session_state(session_state=None, patient_name=None, session_scoped=Fa
 def snapshot_session_state():
     return {
         "patient_name": PATIENT_NAME,
+        "student_id": ACTIVE_STUDENT_ID,
+        "followup_date": ACTIVE_FOLLOWUP_DATE,
         "metadata": metadata,
         "tracker": tracker,
         "field_attempts": field_attempts,
@@ -164,10 +178,143 @@ def get_runtime_excel_path():
     return CURRENT_WORKING_DIR / "medical_data.xlsx"
 
 
+def get_active_student_id(session_state=None):
+    if isinstance(session_state, dict):
+        return str(session_state.get("student_id") or "").strip()
+    return str(ACTIVE_STUDENT_ID or "").strip()
+
+
+def get_active_followup_date(session_state=None):
+    if isinstance(session_state, dict):
+        return str(session_state.get("followup_date") or "").strip()
+    return str(ACTIVE_FOLLOWUP_DATE or "").strip()
+
+
 def get_session_patient_output_dir():
     if not SESSION_SCOPED_RUNTIME or CURRENT_WORKING_DIR == BASE_DIR:
         return None
     return CURRENT_WORKING_DIR
+
+
+def normalize_patient_name_input(patient_name):
+    normalized_name = str(patient_name or "").replace("\u3000", " ").strip()
+    normalized_name = re.sub(r"\s+", " ", normalized_name)
+    return gr.update(value=normalized_name[:20])
+
+
+def validate_patient_name(patient_name):
+    normalized_name = str(patient_name or "").replace("\u3000", " ").strip()
+    normalized_name = re.sub(r"\s+", " ", normalized_name)
+    if not normalized_name:
+        return False, "", "请输入患者姓名。"
+    if len(normalized_name) < 2 or len(normalized_name) > 20:
+        return False, normalized_name, "姓名长度需为2到20个字符。"
+    if normalized_name.isdigit():
+        return False, normalized_name, "姓名不能为纯数字。"
+    if not re.fullmatch(r"[A-Za-z\u4e00-\u9fff· ]+", normalized_name):
+        return False, normalized_name, "姓名格式不正确。"
+    return True, normalized_name, ""
+
+
+def validate_student_id(student_id):
+    normalized_student_id = str(student_id or "").strip()
+    if not normalized_student_id:
+        return False, "", "请输入学工号。"
+    if not normalized_student_id.isdigit() or len(normalized_student_id) != 8:
+        return False, normalized_student_id, "学工号必须为8位数字。"
+    return True, normalized_student_id, ""
+
+
+def normalize_followup_date_input(followup_date):
+    normalized_date = str(followup_date or "").strip()
+    return gr.update(value=normalized_date)
+
+
+def resolve_followup_date(followup_date):
+    normalized_date = str(followup_date or "").strip()
+    if normalized_date:
+        return normalized_date
+    configured_date = str(FOLLOWUP_DATE or "").strip()
+    if configured_date:
+        return configured_date
+    return ""
+
+
+def build_patient_context_html(patient_name="", student_id="", followup_date="", logged_in=False, message=""):
+    if not logged_in:
+        prompt = message or "请先填写患者姓名和学工号，然后点击“开始随访”。"
+        return (
+            "<div class='patient-context-card patient-context-pending'>"
+            "<strong>请先登记患者信息</strong>"
+            f"<span>{html.escape(prompt)}</span>"
+            "</div>"
+        )
+
+    return (
+        "<div class='patient-context-card'>"
+        "<strong>当前患者</strong>"
+        f"<span>{html.escape(patient_name)} | 学工号：{html.escape(student_id)} | 随访日期：{html.escape(followup_date or '当天')}</span>"
+        "</div>"
+    )
+
+
+def build_login_required_view(session_state=None, patient_name="", student_id="", followup_date="", message="请先填写患者姓名和学工号，然后点击“开始随访”。"):
+    active_state = session_state or build_session_state(patient_name or DEFAULT_PATIENT_NAME)
+    active_state["patient_name"] = normalize_patient_name(patient_name or active_state.get("patient_name"))
+    active_state["student_id"] = str(student_id or active_state.get("student_id") or "").strip()
+    active_state["followup_date"] = resolve_followup_date(followup_date or active_state.get("followup_date"))
+    return (
+        active_state,
+        message,
+        [],
+        "",
+        build_patient_context_html(active_state["patient_name"], active_state["student_id"], active_state["followup_date"], logged_in=False, message=message),
+        gr.update(value=build_progress_html(), visible=False),
+        "",
+        gr.update(value=None, visible=False),
+        gr.update(value=pd.DataFrame(), visible=False),
+        gr.update(interactive=False),
+        gr.update(value="", visible=False),
+        gr.update(value=None, visible=False),
+        gr.update(value="", visible=False),
+        gr.update(value="", visible=False),
+        gr.update(value=None, visible=False),
+        gr.update(
+            value="",
+            placeholder="请先填写患者姓名和学工号",
+            interactive=False,
+        ),
+    )
+
+
+def build_login_invalid_view(session_state=None, patient_name="", student_id="", followup_date="", message="请先填写患者姓名和学工号，然后点击“开始随访”。"):
+    return build_login_required_view(session_state, patient_name, student_id, followup_date, message)
+
+
+def normalize_student_id_input(student_id):
+    normalized_student_id = re.sub(r"\D", "", str(student_id or "").strip())
+    return gr.update(value=normalized_student_id[:8])
+
+
+def start_followup(session_state, patient_name, student_id, followup_date):
+    valid_patient_name, normalized_patient_name, patient_name_message = validate_patient_name(patient_name)
+    valid_student_id, normalized_student_id, student_id_message = validate_student_id(student_id)
+    resolved_followup_date = resolve_followup_date(followup_date)
+    if not valid_patient_name:
+        return build_login_invalid_view(session_state, normalized_patient_name, normalized_student_id, resolved_followup_date, patient_name_message)
+    if not valid_student_id:
+        return build_login_invalid_view(session_state, normalized_patient_name, normalized_student_id, resolved_followup_date, student_id_message)
+
+    result = list(init_system(session_state, normalized_patient_name))
+    result[0]["student_id"] = normalized_student_id
+    result[0]["followup_date"] = resolved_followup_date
+    result.insert(4, build_patient_context_html(normalized_patient_name, normalized_student_id, resolved_followup_date, logged_in=True))
+    result[5] = gr.update(value=result[5], visible=True)
+    result.insert(6, "")
+    result[8] = gr.update(value=result[8], visible=False)
+    result.insert(9, gr.update(interactive=True))
+    result[15] = gr.update(value=result[15], interactive=True)
+    return tuple(result)
 
 CUSTOM_CSS = """
 :root {
@@ -324,6 +471,31 @@ CUSTOM_CSS = """
     font-size: 0.88rem;
     line-height: 1.5;
     border: 1px solid rgba(207, 227, 251, 0.9);
+}
+
+.patient-context-card {
+    margin: 0 0 10px;
+    padding: 12px 14px;
+    border-radius: 16px;
+    background: linear-gradient(180deg, rgba(238, 246, 255, 0.96) 0%, rgba(228, 240, 253, 0.96) 100%);
+    border: 1px solid rgba(187, 210, 235, 0.95);
+}
+
+.patient-context-card strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--brand-ink);
+    font-size: 0.94rem;
+}
+
+.patient-context-card span {
+    color: var(--brand-subtle);
+    font-size: 0.9rem;
+    line-height: 1.55;
+}
+
+.patient-context-pending {
+    background: linear-gradient(180deg, rgba(246, 249, 255, 0.98) 0%, rgba(240, 245, 252, 0.98) 100%);
 }
 
 .upload-stage-note {
@@ -770,6 +942,14 @@ def build_upload_component_updates(current_field, clear_values=False):
     )
 
 
+def build_result_component_updates(file_path, df, current_field):
+    followup_finished = current_field is None
+    return (
+        gr.update(value=file_path, visible=followup_finished),
+        gr.update(value=df, visible=followup_finished),
+    )
+
+
 def export_tracker_data():
     df = pd.DataFrame(tracker.get_parse_history())
     df = filter_exported_child_rows(df)
@@ -918,9 +1098,11 @@ def save_uploaded_report(uploaded_file, current_field=None):
 
     if current_field == KIDNEY_ULTRASOUND_FIELD:
         patient_output_dir = get_session_patient_output_dir()
+        student_id = get_active_student_id(snapshot_session_state())
         status, saved_path = save_report_file_only(
             str(uploaded_path),
             patient_name=PATIENT_NAME,
+            student_id=student_id,
             field_name=current_field,
             **({"patient_output_dir": patient_output_dir} if patient_output_dir else {}),
         )
@@ -930,9 +1112,11 @@ def save_uploaded_report(uploaded_file, current_field=None):
         return status, saved_path or "", None, gr.update(value=None), []
 
     patient_output_dir = get_session_patient_output_dir()
+    student_id = get_active_student_id(snapshot_session_state())
     status, output_path, rows = run_report_upload_flow_with_rows(
         str(uploaded_path),
         patient_name=PATIENT_NAME,
+        student_id=student_id,
         field_name=current_field,
         **({"patient_output_dir": patient_output_dir} if patient_output_dir else {}),
     )
@@ -1010,6 +1194,9 @@ def advance_after_report_upload(current_chat_history, extracted_rows=None):
 def handle_report_upload(session_state, uploaded_file, current_chat_history):
     with SESSION_LOCK:
         apply_session_state(session_state, session_scoped=True)
+        active_student_id = str(session_state.get("student_id") or "").strip() if isinstance(session_state, dict) else ""
+        active_followup_date = str(session_state.get("followup_date") or "").strip() if isinstance(session_state, dict) else ""
+        patient_context = build_patient_context_html(PATIENT_NAME, active_student_id, active_followup_date, logged_in=True)
         current_field = tracker.get_next_field()
         status_text, saved_path, download_path, upload_reset, rows = save_uploaded_report(
             uploaded_file,
@@ -1019,14 +1206,17 @@ def handle_report_upload(session_state, uploaded_file, current_chat_history):
         if not saved_path:
             df, file_path = export_tracker_data()
             upload_note, _, _, _, _ = build_upload_component_updates(current_field, clear_values=True)
+            download_update, dataframe_update = build_result_component_updates(file_path, df, current_field)
             return (
                 snapshot_session_state(),
                 clone_chat_history(current_chat_history),
                 current_field,
+                patient_context,
                 build_progress_html(),
                 status_text,
-                file_path,
-                df,
+                download_update,
+                dataframe_update,
+                gr.update(interactive=True),
                 upload_note,
                 upload_reset,
                 status_text,
@@ -1040,14 +1230,17 @@ def handle_report_upload(session_state, uploaded_file, current_chat_history):
             rows,
         )
         upload_note, _, _, _, _ = build_upload_component_updates(next_field, clear_values=True)
+        download_update, dataframe_update = build_result_component_updates(file_path, df, next_field)
         return (
             snapshot_session_state(),
             updated_chat_history,
             next_field,
+            patient_context,
             progress_text,
             parse_text,
-            file_path,
-            df,
+            download_update,
+            dataframe_update,
+            gr.update(interactive=True),
             upload_note,
             upload_reset,
             status_text,
@@ -1061,6 +1254,7 @@ def stream_assistant_messages(
     base_history,
     new_messages,
     current_field,
+    patient_context_html,
     progress_text,
     parse_text,
     file_path,
@@ -1085,6 +1279,7 @@ def stream_assistant_messages(
                 gr.update(value="", interactive=False, placeholder=current_placeholder),
                 clone_chat_history(display_history),
                 current_field,
+                patient_context_html,
                 progress_text,
                 parse_text,
                 file_path,
@@ -1102,6 +1297,7 @@ def stream_assistant_messages(
         gr.update(value="", interactive=True, placeholder=current_placeholder),
         clone_chat_history(display_history),
         current_field,
+        patient_context_html,
         progress_text,
         parse_text,
         file_path,
@@ -1265,6 +1461,8 @@ def process_user_input(user_message, current_chat_history):
 def download_data(session_state=None, patient_name=None):
     with SESSION_LOCK:
         apply_session_state(session_state, patient_name, session_scoped=session_state is not None)
+        student_id = get_active_student_id(session_state) or get_active_student_id(snapshot_session_state())
+        followup_date = get_active_followup_date(session_state) or get_active_followup_date(snapshot_session_state())
         file_path = get_runtime_excel_path()
         if not os.path.exists(file_path):
             _, generated_path = export_tracker_data()
@@ -1273,6 +1471,8 @@ def download_data(session_state=None, patient_name=None):
             file_path,
             uploaded_report_path=last_report_output_path or None,
             patient_name=PATIENT_NAME,
+            student_id=student_id,
+            followup_date=followup_date,
         )
 
 
@@ -1302,13 +1502,47 @@ def respond(*args):
     else:
         raise TypeError("respond expects either (message, chat_history) or (session_state, patient_name, message, chat_history)")
 
+    def finalize_payload(payload):
+        if include_session_state:
+            return (snapshot_session_state(), *payload)
+        reduced_payload = list(payload)
+        if len(reduced_payload) >= 4:
+            reduced_payload.pop(3)
+        return tuple(reduced_payload)
+
     with SESSION_LOCK:
         apply_session_state(current_session_state, patient_name, session_scoped=include_session_state)
+        active_student_id = ""
+        if isinstance(current_session_state, dict):
+            active_student_id = str(current_session_state.get("student_id") or "").strip()
+        active_followup_date = ""
+        if isinstance(current_session_state, dict):
+            active_followup_date = str(current_session_state.get("followup_date") or "").strip()
+        if include_session_state and (not str(patient_name or "").strip() or not active_student_id):
+            payload = (
+                gr.update(value="", interactive=False, placeholder="请先填写患者姓名和学工号"),
+                clone_chat_history(chat_history),
+                gr.update(),
+                build_patient_context_html(message="请先填写患者姓名和学工号，然后点击“开始随访”。"),
+                gr.update(),
+                "请先填写患者姓名和学工号，然后点击“开始随访”。",
+                gr.update(),
+                gr.update(),
+                gr.update(interactive=True),
+                gr.update(value="", visible=False),
+                gr.update(value=None, visible=False),
+                gr.update(value="", visible=False),
+                gr.update(value="", visible=False),
+                gr.update(),
+            )
+            yield finalize_payload(payload)
+            return
         if not message or not message.strip():
             payload = (
                 gr.update(value="", interactive=True, placeholder=get_input_placeholder(tracker.get_next_field())),
                 clone_chat_history(chat_history),
                 gr.update(),
+                build_patient_context_html(PATIENT_NAME, active_student_id, active_followup_date, logged_in=include_session_state),
                 gr.update(),
                 "请输入内容后再发送。",
                 gr.update(),
@@ -1320,7 +1554,7 @@ def respond(*args):
                 gr.update(),
                 gr.update(),
             )
-            yield (snapshot_session_state(), *payload) if include_session_state else payload
+            yield finalize_payload(payload)
             return
 
         base_history = clone_chat_history(chat_history)
@@ -1330,6 +1564,7 @@ def respond(*args):
             gr.update(value="", interactive=False),
             pending_history,
             gr.update(),
+            build_patient_context_html(PATIENT_NAME, active_student_id, active_followup_date, logged_in=include_session_state),
             gr.update(),
             "正在解析并生成回复，请稍候...",
             gr.update(),
@@ -1341,11 +1576,12 @@ def respond(*args):
             gr.update(),
             gr.update(),
         )
-        yield (snapshot_session_state(), *payload) if include_session_state else payload
+        yield finalize_payload(payload)
 
         _, updated_chat_history, current_field, progress_text, parse_text, file_path, df = process_user_input(message, base_history)
         new_messages = updated_chat_history[len(chat_history or []):]
         assistant_messages = [item for item in new_messages if item.get("role") == "assistant"]
+        download_update, dataframe_update = build_result_component_updates(file_path, df, current_field)
 
         if not assistant_messages:
             upload_note, upload_file_update, upload_status_update, upload_path_update, msg_placeholder_update = build_upload_component_updates(current_field)
@@ -1353,10 +1589,11 @@ def respond(*args):
                 gr.update(value="", interactive=True, **msg_placeholder_update),
                 updated_chat_history,
                 current_field,
+                build_patient_context_html(PATIENT_NAME, active_student_id, active_followup_date, logged_in=include_session_state),
                 progress_text,
                 parse_text,
-                file_path,
-                df,
+                download_update,
+                dataframe_update,
                 gr.update(interactive=True),
                 upload_note,
                 upload_file_update,
@@ -1364,19 +1601,20 @@ def respond(*args):
                 upload_path_update,
                 gr.update(),
             )
-            yield (snapshot_session_state(), *payload) if include_session_state else payload
+            yield finalize_payload(payload)
             return
 
         for payload in stream_assistant_messages(
             pending_history,
             assistant_messages,
             current_field,
+            build_patient_context_html(PATIENT_NAME, active_student_id, active_followup_date, logged_in=include_session_state),
             progress_text,
             parse_text,
-            file_path,
-            df,
+            download_update,
+            dataframe_update,
         ):
-            yield (snapshot_session_state(), *payload) if include_session_state else payload
+            yield finalize_payload(payload)
 
 
 with gr.Blocks(title="AI医疗随访系统") as demo:
@@ -1387,21 +1625,37 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 gr.Markdown("### 随访进度", elem_classes=["section-title"])
                 patient_name_input = gr.Textbox(
                     label="患者姓名",
-                    value=DEFAULT_PATIENT_NAME,
+                    value="",
                     placeholder="请输入当前患者姓名",
                     elem_classes=["compact-box", "metric-box"],
                 )
+                student_id_input = gr.Textbox(
+                    label="学工号",
+                    value="",
+                    placeholder="请输入当前患者学工号",
+                    elem_classes=["compact-box", "metric-box"],
+                )
+                followup_date_input = gr.Textbox(
+                    label="随访日期",
+                    value="",
+                    placeholder="可手动输入，如 2025.06.12；留空则按默认/当天日期",
+                    elem_classes=["compact-box", "metric-box"],
+                )
                 with gr.Group(elem_classes=["sidebar-primary"]):
-                    progress_output = gr.HTML(build_progress_html())
+                    progress_output = gr.HTML(build_progress_html(), visible=False)
                 with gr.Row(elem_classes=["button-row"]):
-                    init_btn = gr.Button("重新开始", variant="primary", elem_classes=["primary-action"])
-                    download_btn = gr.DownloadButton(label="导出结果", value=download_data, visible=True, elem_classes=["soft-action"])
+                    start_btn = gr.Button("开始随访", variant="primary", elem_classes=["primary-action"])
+                    init_btn = gr.Button("重新开始", visible=False, elem_classes=["soft-action"])
+                    download_btn = gr.DownloadButton(label="导出结果", value=download_data, visible=False, elem_classes=["soft-action"])
                 with gr.Accordion("查看详细状态", open=False, elem_classes=["compact-accordion"]):
                     question_output = gr.Textbox(label="当前问题主题", interactive=False, elem_classes=["compact-box", "metric-box"])
                     status_output = gr.Textbox(label="系统状态", interactive=False, elem_classes=["compact-box", "metric-box"])
                     parse_output = gr.Textbox(label="系统识别详情", lines=4, interactive=False, elem_classes=["compact-box", "long-box"])
             with gr.Column(scale=4, elem_classes=["chat-card"]):
                 gr.Markdown("### 随访对话", elem_classes=["section-title"])
+                patient_context_output = gr.HTML(
+                    build_patient_context_html(message="请先填写患者姓名和学工号，然后点击“开始随访”。"),
+                )
                 gr.HTML(
                     """
                     <div class="chat-head">
@@ -1413,11 +1667,12 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                 with gr.Row(elem_classes=["composer-row"]):
                     msg = gr.Textbox(
                         label="请输入您的回答",
-                        placeholder=DEFAULT_INPUT_PLACEHOLDER,
+                        placeholder="请先填写患者姓名和学工号",
                         lines=1,
+                        interactive=False,
                         elem_classes=["compact-box"]
                     )
-                    submit_btn = gr.Button("发送", variant="primary", elem_classes=["primary-action", "chat-actions"])
+                    submit_btn = gr.Button("发送", variant="primary", interactive=False, elem_classes=["primary-action", "chat-actions"])
                 upload_stage_note = gr.HTML(
                     build_upload_stage_note(tracker.get_next_field()),
                     visible=False,
@@ -1452,19 +1707,44 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             gr.Markdown("### 结果校对", elem_classes=["section-title"])
             gr.Markdown("如需人工修正，可展开下方表格直接编辑，导出时会保留修改结果。", elem_classes=["chat-tip"])
             with gr.Accordion("展开或收起随访数据表", open=False, elem_classes=["data-shell"]):
-                dataframe_output = gr.Dataframe(label="文件内容", interactive=True)
+                dataframe_output = gr.Dataframe(label="文件内容", interactive=True, visible=False)
 
-    init_btn.click(
-        fn=init_system,
-        inputs=[session_state, patient_name_input],
+    start_btn.click(
+        fn=start_followup,
+        inputs=[session_state, patient_name_input, student_id_input, followup_date_input],
         outputs=[
             session_state,
             status_output,
             chatbot,
             question_output,
+            patient_context_output,
             progress_output,
+            parse_output,
             download_btn,
             dataframe_output,
+            submit_btn,
+            upload_stage_note,
+            report_upload,
+            report_status,
+            report_saved_path,
+            report_download_output,
+            msg,
+        ],
+    )
+    init_btn.click(
+        fn=start_followup,
+        inputs=[session_state, patient_name_input, student_id_input, followup_date_input],
+        outputs=[
+            session_state,
+            status_output,
+            chatbot,
+            question_output,
+            patient_context_output,
+            progress_output,
+            parse_output,
+            download_btn,
+            dataframe_output,
+            submit_btn,
             upload_stage_note,
             report_upload,
             report_status,
@@ -1474,16 +1754,19 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
         ],
     )
     demo.load(
-        fn=init_system,
-        inputs=[session_state, patient_name_input],
+        fn=build_login_required_view,
+        inputs=[session_state, patient_name_input, student_id_input, followup_date_input],
         outputs=[
             session_state,
             status_output,
             chatbot,
             question_output,
+            patient_context_output,
             progress_output,
+            parse_output,
             download_btn,
             dataframe_output,
+            submit_btn,
             upload_stage_note,
             report_upload,
             report_status,
@@ -1491,6 +1774,21 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             report_download_output,
             msg,
         ],
+    )
+    patient_name_input.input(
+        fn=normalize_patient_name_input,
+        inputs=patient_name_input,
+        outputs=patient_name_input,
+    )
+    student_id_input.input(
+        fn=normalize_student_id_input,
+        inputs=student_id_input,
+        outputs=student_id_input,
+    )
+    followup_date_input.input(
+        fn=normalize_followup_date_input,
+        inputs=followup_date_input,
+        outputs=followup_date_input,
     )
     download_btn.click(
         fn=download_data,
@@ -1509,10 +1807,12 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             session_state,
             chatbot,
             question_output,
+            patient_context_output,
             progress_output,
             parse_output,
             download_btn,
             dataframe_output,
+            submit_btn,
             upload_stage_note,
             report_upload,
             report_status,
@@ -1534,6 +1834,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             msg,
             chatbot,
             question_output,
+            patient_context_output,
             progress_output,
             parse_output,
             download_btn,
@@ -1554,6 +1855,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
             msg,
             chatbot,
             question_output,
+            patient_context_output,
             progress_output,
             parse_output,
             download_btn,
