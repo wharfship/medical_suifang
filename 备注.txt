@@ -1,0 +1,7 @@
+
+打开这个服务器的终端（不是你电脑的终端）（方法：ctrl+j,下面会有个面板出来，当然如果本来就有，那就再按一下）
+在终端中运行以下三行指令。
+cd /home/suifang/medical_suifang
+sudo systemctl restart medical-suifang
+sudo systemctl status medical-suifang
+然后重启那个前端页面，就更新了
