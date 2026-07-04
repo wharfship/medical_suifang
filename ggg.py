@@ -25,6 +25,7 @@ from workflow_status import (
 )
 
 FILE_NAME = "子问题.xls"
+FOLLOWUP_RESULT_LABEL = "第三次随访2026.02.19-2026.02.28"
 FOLLOWUP_DATE = ""
 BASE_DIR = Path(__file__).resolve().parent
 excel_path = BASE_DIR / FILE_NAME
@@ -980,6 +981,7 @@ def persist_current_followup_output(file_path=None):
         patient_name=PATIENT_NAME,
         student_id=get_active_student_id(snapshot_session_state()),
         followup_date=get_active_followup_date(snapshot_session_state()),
+        followup_label=FOLLOWUP_RESULT_LABEL,
     )
 
 

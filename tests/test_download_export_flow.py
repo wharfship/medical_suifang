@@ -39,6 +39,7 @@ class DownloadExportFlowTests(unittest.TestCase):
             patient_name=ggg.DEFAULT_PATIENT_NAME,
             student_id="30291834",
             followup_date="2025.06.12",
+            followup_label=ggg.FOLLOWUP_RESULT_LABEL,
         )
 
     def test_process_user_input_persists_server_output_when_followup_completes(self):

@@ -1,7 +1,6 @@
 import os
 import tempfile
 import unittest
-from unittest import mock
 
 from medical_output_flow import (
     build_followup_result_dirname,
@@ -10,21 +9,25 @@ from medical_output_flow import (
     persist_followup_export,
 )
 
-PATIENT_NAME = "\u674e\u540c\u5b66"
+
+PATIENT_NAME = "李同学"
 STUDENT_ID = "30291834"
 FOLLOWUP_DATE = "2025.06.12"
+FOLLOWUP_LABEL = "第一次随访2026.02.07-2026.02.18"
 
 
 class MedicalOutputPersistenceTests(unittest.TestCase):
     def test_build_followup_result_dirname_uses_readable_suffix(self):
         self.assertEqual(build_followup_result_dirname(FOLLOWUP_DATE), "2025.06.12随访结果")
 
+    def test_build_followup_result_dirname_prefers_custom_followup_label(self):
+        self.assertEqual(build_followup_result_dirname(FOLLOWUP_DATE, followup_label=FOLLOWUP_LABEL), FOLLOWUP_LABEL)
+
     def test_persist_followup_export_saves_excel_and_uploaded_report_in_patient_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_excel_path = os.path.join(temp_dir, "medical_data.xlsx")
             uploaded_report_path = os.path.join(temp_dir, "report.pdf")
             output_dir = os.path.join(temp_dir, "outputs")
-            patient_name = PATIENT_NAME
 
             with open(source_excel_path, "wb") as handle:
                 handle.write(b"fake-excel")
@@ -35,17 +38,18 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 source_excel_path,
                 output_dir=output_dir,
                 uploaded_report_path=uploaded_report_path,
-                patient_name=patient_name,
+                patient_name=PATIENT_NAME,
                 student_id=STUDENT_ID,
                 followup_date=FOLLOWUP_DATE,
+                followup_label=FOLLOWUP_LABEL,
             )
 
             submission_dir = os.path.dirname(output_path)
             copied_report_path = os.path.join(submission_dir, "report.pdf")
             expected_dir = os.path.join(
                 output_dir,
-                build_patient_storage_name(patient_name, STUDENT_ID),
-                build_followup_result_dirname(FOLLOWUP_DATE),
+                build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
+                FOLLOWUP_LABEL,
             )
 
             self.assertTrue(os.path.exists(output_path))
@@ -71,6 +75,7 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 patient_name=PATIENT_NAME,
                 student_id=STUDENT_ID,
                 followup_date=FOLLOWUP_DATE,
+                followup_label=FOLLOWUP_LABEL,
             )
 
             self.assertTrue(os.path.exists(output_path))
@@ -85,6 +90,7 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 patient_name=PATIENT_NAME,
                 student_id=STUDENT_ID,
                 followup_date=FOLLOWUP_DATE,
+                followup_label=FOLLOWUP_LABEL,
             )
 
             self.assertEqual(
@@ -92,7 +98,7 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 os.path.join(
                     output_dir,
                     build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
-                    build_followup_result_dirname(FOLLOWUP_DATE),
+                    FOLLOWUP_LABEL,
                 ),
             )
             self.assertTrue(os.path.isdir(str(patient_output_dir)))
@@ -105,7 +111,7 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
             patient_output_dir = os.path.join(
                 output_dir,
                 build_patient_storage_name(PATIENT_NAME, STUDENT_ID),
-                build_followup_result_dirname(FOLLOWUP_DATE),
+                FOLLOWUP_LABEL,
             )
 
             with open(source_excel_path, "wb") as handle:
@@ -120,6 +126,7 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 patient_name=PATIENT_NAME,
                 student_id=STUDENT_ID,
                 followup_date=FOLLOWUP_DATE,
+                followup_label=FOLLOWUP_LABEL,
             )
 
             with open(source_excel_path, "wb") as handle:
@@ -134,6 +141,7 @@ class MedicalOutputPersistenceTests(unittest.TestCase):
                 patient_name=PATIENT_NAME,
                 student_id=STUDENT_ID,
                 followup_date=FOLLOWUP_DATE,
+                followup_label=FOLLOWUP_LABEL,
             )
 
             self.assertEqual(os.path.dirname(first_output_path), patient_output_dir)
