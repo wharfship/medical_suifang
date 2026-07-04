@@ -1218,6 +1218,7 @@ def advance_after_report_upload(current_chat_history, extracted_rows=None):
 def handle_report_upload(session_state, uploaded_file, current_chat_history):
     with SESSION_LOCK:
         apply_session_state(session_state, session_scoped=True)
+        chat_history[:] = clone_chat_history(current_chat_history)
         active_student_id = str(session_state.get("student_id") or "").strip() if isinstance(session_state, dict) else ""
         active_followup_date = str(session_state.get("followup_date") or "").strip() if isinstance(session_state, dict) else ""
         patient_context = build_patient_context_html(PATIENT_NAME, active_student_id, active_followup_date, logged_in=True)
@@ -1253,6 +1254,7 @@ def handle_report_upload(session_state, uploaded_file, current_chat_history):
             current_chat_history,
             rows,
         )
+        chat_history[:] = clone_chat_history(updated_chat_history)
         upload_note, _, _, _, _ = build_upload_component_updates(next_field, clear_values=True)
         download_update, dataframe_update = build_result_component_updates(file_path, df, next_field)
         return (
@@ -1530,6 +1532,8 @@ def respond(*args):
 
     with SESSION_LOCK:
         apply_session_state(current_session_state, patient_name, session_scoped=include_session_state)
+        latest_chat_history = clone_chat_history(current_chat_history if current_chat_history is not None else chat_history)
+        chat_history[:] = clone_chat_history(latest_chat_history)
         active_student_id = ""
         if isinstance(current_session_state, dict):
             active_student_id = str(current_session_state.get("student_id") or "").strip()
@@ -1539,7 +1543,7 @@ def respond(*args):
         if include_session_state and (not str(patient_name or "").strip() or not active_student_id):
             payload = (
                 gr.update(value="", interactive=False, placeholder="请先填写患者姓名和学工号"),
-                clone_chat_history(chat_history),
+                clone_chat_history(latest_chat_history),
                 gr.update(),
                 build_patient_context_html(message="请先填写患者姓名和学工号，然后点击“开始随访”。"),
                 gr.update(),
@@ -1558,7 +1562,7 @@ def respond(*args):
         if not message or not message.strip():
             payload = (
                 gr.update(value="", interactive=True, placeholder=get_input_placeholder(tracker.get_next_field())),
-                clone_chat_history(chat_history),
+                clone_chat_history(latest_chat_history),
                 gr.update(),
                 build_patient_context_html(PATIENT_NAME, active_student_id, active_followup_date, logged_in=include_session_state),
                 gr.update(),
@@ -1575,7 +1579,7 @@ def respond(*args):
             yield finalize_payload(payload)
             return
 
-        base_history = clone_chat_history(chat_history)
+        base_history = clone_chat_history(latest_chat_history)
         pending_history = clone_chat_history(base_history)
         pending_history.append({"role": "user", "content": message})
         payload = (
@@ -1597,8 +1601,9 @@ def respond(*args):
         yield finalize_payload(payload)
 
         _, updated_chat_history, current_field, progress_text, parse_text, file_path, df = process_user_input(message, base_history)
-        new_messages = updated_chat_history[len(chat_history or []):]
+        new_messages = updated_chat_history[len(base_history):]
         assistant_messages = [item for item in new_messages if item.get("role") == "assistant"]
+        chat_history[:] = clone_chat_history(updated_chat_history)
         download_update, dataframe_update = build_result_component_updates(file_path, df, current_field)
 
         if not assistant_messages:

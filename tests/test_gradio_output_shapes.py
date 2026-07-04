@@ -73,6 +73,37 @@ class GradioOutputShapeTests(unittest.TestCase):
             "当前未提供API",
         )
 
+    def test_respond_uses_latest_chatbot_history_instead_of_stale_global_state(self):
+        ggg.chat_history[:] = [{"role": "assistant", "content": "stale"}]
+        incoming_history = [
+            {"role": "assistant", "content": "您好，我是医疗随访助手，需要了解您的健康状况。"},
+            {"role": "assistant", "content": "请问您目前有高血压吗？"},
+        ]
+
+        captured = {}
+
+        def fake_process_user_input(message, base_history):
+            captured["base_history"] = base_history
+            return (
+                "",
+                base_history + [{"role": "user", "content": message}, {"role": "assistant", "content": "没有高血压"}],
+                "下一个问题",
+                "50%",
+                "解析结果",
+                "medical_data.xlsx",
+                pd.DataFrame(),
+            )
+
+        with mock.patch.object(ggg, "process_user_input", side_effect=fake_process_user_input):
+            outputs = list(ggg.respond("没有高血压", incoming_history))
+
+        self.assertEqual(captured["base_history"], incoming_history)
+        self.assertEqual(outputs[-1][1][-3:], [
+            {"role": "assistant", "content": "请问您目前有高血压吗？"},
+            {"role": "user", "content": "没有高血压"},
+            {"role": "assistant", "content": "没有高血压"},
+        ])
+
     def test_export_tracker_data_hides_children_after_parent_summary_generated(self):
         metadata = {
             "（若有高血压）药物使用情况": {"描述": "", "示例": "", "依赖": {}},
