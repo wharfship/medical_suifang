@@ -53,7 +53,7 @@ class GradioOutputShapeTests(unittest.TestCase):
         self.assertEqual(
             result[-1],
             gr.update(
-                placeholder=ggg.DEFAULT_INPUT_PLACEHOLDER,
+                placeholder=ggg.get_input_placeholder(result[3]),
                 interactive=True,
             ),
         )

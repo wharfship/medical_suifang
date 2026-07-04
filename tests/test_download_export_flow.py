@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from unittest import mock
 
 import gradio as gr
@@ -8,6 +9,20 @@ import ggg
 
 
 class DownloadExportFlowTests(unittest.TestCase):
+    def test_get_effective_followup_result_label_uses_configured_value(self):
+        with mock.patch.object(ggg, "FOLLOWUP_RESULT_LABEL", "第四次随访2026.04.19-2026.04.28"):
+            self.assertEqual(
+                ggg.get_effective_followup_result_label(),
+                "第四次随访2026.04.19-2026.04.28",
+            )
+
+    def test_get_effective_followup_result_label_falls_back_to_current_time(self):
+        with mock.patch.object(ggg, "FOLLOWUP_RESULT_LABEL", ""):
+            self.assertEqual(
+                ggg.get_effective_followup_result_label(now=datetime(2026, 6, 29, 18, 24)),
+                "2026/06/29/18:24随访",
+            )
+
     def test_download_data_returns_runtime_excel_for_download_only(self):
         session_state = ggg.build_session_state(ggg.DEFAULT_PATIENT_NAME, "30291834")
         session_state["followup_date"] = "2025.06.12"
@@ -27,7 +42,9 @@ class DownloadExportFlowTests(unittest.TestCase):
     def test_persist_current_followup_output_copies_runtime_excel_into_outputs(self):
         with mock.patch.object(ggg, "persist_followup_export", return_value="fake-output.xlsx") as persist_mock, mock.patch.object(
             ggg, "get_runtime_excel_path", return_value=ggg.Path("medical_data.xlsx")
-        ), mock.patch.object(ggg, "snapshot_session_state", return_value={"student_id": "30291834", "followup_date": "2025.06.12"}):
+        ), mock.patch.object(ggg, "snapshot_session_state", return_value={"student_id": "30291834", "followup_date": "2025.06.12"}), mock.patch.object(
+            ggg, "get_session_patient_output_dir", return_value=ggg.Path("session-dir")
+        ), mock.patch.object(ggg, "update_patient_summary_workbook") as summary_mock:
             ggg.PATIENT_NAME = ggg.DEFAULT_PATIENT_NAME
             ggg.last_report_output_path = "report.xlsx"
             output_path = ggg.persist_current_followup_output()
@@ -39,8 +56,25 @@ class DownloadExportFlowTests(unittest.TestCase):
             patient_name=ggg.DEFAULT_PATIENT_NAME,
             student_id="30291834",
             followup_date="2025.06.12",
-            followup_label=ggg.FOLLOWUP_RESULT_LABEL,
+            followup_label=ggg.get_effective_followup_result_label(),
+            source_artifact_dir=ggg.Path("session-dir"),
         )
+        summary_mock.assert_called_once_with(
+            output_dir=ggg.OUTPUT_DIR,
+            patient_name=ggg.DEFAULT_PATIENT_NAME,
+            student_id="30291834",
+        )
+
+    def test_persist_current_followup_output_ignores_summary_refresh_failure(self):
+        with mock.patch.object(ggg, "persist_followup_export", return_value="fake-output.xlsx"), mock.patch.object(
+            ggg, "get_runtime_excel_path", return_value=ggg.Path("medical_data.xlsx")
+        ), mock.patch.object(ggg, "snapshot_session_state", return_value={"student_id": "30291834", "followup_date": "2025.06.12"}), mock.patch.object(
+            ggg, "get_session_patient_output_dir", return_value=ggg.Path("session-dir")
+        ), mock.patch.object(ggg, "update_patient_summary_workbook", side_effect=PermissionError("locked")):
+            ggg.PATIENT_NAME = ggg.DEFAULT_PATIENT_NAME
+            output_path = ggg.persist_current_followup_output()
+
+        self.assertEqual(output_path, "fake-output.xlsx")
 
     def test_process_user_input_persists_server_output_when_followup_completes(self):
         metadata = {

@@ -15,7 +15,13 @@ from field_rules import (
     apply_field_completion_rules,
 )
 from lab_report_extractor import extract_followup_value_from_rows
-from medical_output_flow import DEFAULT_PATIENT_NAME, OUTPUT_DIR, build_patient_storage_name, persist_followup_export
+from medical_output_flow import (
+    DEFAULT_PATIENT_NAME,
+    OUTPUT_DIR,
+    build_patient_storage_name,
+    persist_followup_export,
+    update_patient_summary_workbook,
+)
 from report_upload_flow import run_report_upload_flow_with_rows, save_report_file_only
 from workflow_status import (
     finalize_after_attempt_limit,
@@ -23,9 +29,10 @@ from workflow_status import (
     is_final_status,
     normalize_parse_result,
 )
+from datetime import datetime
 
-FILE_NAME = "子问题.xls"
-FOLLOWUP_RESULT_LABEL = "第三次随访2026.02.19-2026.02.28"
+FILE_NAME = "人工智能供者随访计划.xls"
+FOLLOWUP_RESULT_LABEL = ""
 FOLLOWUP_DATE = ""
 BASE_DIR = Path(__file__).resolve().parent
 excel_path = BASE_DIR / FILE_NAME
@@ -969,20 +976,39 @@ def export_tracker_data():
     return df, str(excel_file)
 
 
+def get_effective_followup_result_label(now=None):
+    configured_label = str(globals().get("FOLLOWUP_RESULT_LABEL", "") or "").strip()
+    if configured_label:
+        return configured_label
+
+    current_time = now or datetime.now()
+    return current_time.strftime("%Y/%m/%d/%H:%M随访")
+
+
 def persist_current_followup_output(file_path=None):
     runtime_file_path = Path(file_path) if file_path else get_runtime_excel_path()
     if not runtime_file_path.exists():
         _, generated_path = export_tracker_data()
         runtime_file_path = Path(generated_path)
 
-    return persist_followup_export(
+    output_path = persist_followup_export(
         runtime_file_path,
         uploaded_report_path=last_report_output_path or None,
         patient_name=PATIENT_NAME,
         student_id=get_active_student_id(snapshot_session_state()),
         followup_date=get_active_followup_date(snapshot_session_state()),
-        followup_label=FOLLOWUP_RESULT_LABEL,
+        followup_label=get_effective_followup_result_label(),
+        source_artifact_dir=get_session_patient_output_dir(),
     )
+    try:
+        update_patient_summary_workbook(
+            output_dir=OUTPUT_DIR,
+            patient_name=PATIENT_NAME,
+            student_id=get_active_student_id(snapshot_session_state()),
+        )
+    except Exception as exc:
+        print(f"刷新汇总结果失败: {exc}")
+    return output_path
 
 
 def add_assistant_message(message, current_chat_history):
