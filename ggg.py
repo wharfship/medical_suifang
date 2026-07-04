@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import uuid
+from datetime import date
 from pathlib import Path
 
 from excel_adjusting import *
@@ -237,7 +238,7 @@ def resolve_followup_date(followup_date):
     configured_date = str(FOLLOWUP_DATE or "").strip()
     if configured_date:
         return configured_date
-    return ""
+    return date.today().strftime("%Y.%m.%d")
 
 
 def build_patient_context_html(patient_name="", student_id="", followup_date="", logged_in=False, message=""):
@@ -296,7 +297,7 @@ def normalize_student_id_input(student_id):
     return gr.update(value=normalized_student_id[:8])
 
 
-def start_followup(session_state, patient_name, student_id, followup_date):
+def start_followup(session_state, patient_name, student_id, followup_date=""):
     valid_patient_name, normalized_patient_name, patient_name_message = validate_patient_name(patient_name)
     valid_student_id, normalized_student_id, student_id_message = validate_student_id(student_id)
     resolved_followup_date = resolve_followup_date(followup_date)
@@ -313,7 +314,14 @@ def start_followup(session_state, patient_name, student_id, followup_date):
     result.insert(6, "")
     result[8] = gr.update(value=result[8], visible=False)
     result.insert(9, gr.update(interactive=True))
-    result[15] = gr.update(value=result[15], interactive=True)
+    msg_update = result[15]
+    if isinstance(msg_update, dict):
+        msg_kwargs = dict(msg_update)
+        msg_kwargs.pop("__type__", None)
+        msg_kwargs["interactive"] = True
+        result[15] = gr.update(**msg_kwargs)
+    else:
+        result[15] = gr.update(value=msg_update, interactive=True)
     return tuple(result)
 
 CUSTOM_CSS = """
@@ -945,7 +953,7 @@ def build_upload_component_updates(current_field, clear_values=False):
 def build_result_component_updates(file_path, df, current_field):
     followup_finished = current_field is None
     return (
-        gr.update(value=file_path, visible=followup_finished),
+        gr.update(value=file_path if followup_finished else None, visible=followup_finished),
         gr.update(value=df, visible=followup_finished),
     )
 
@@ -958,6 +966,21 @@ def export_tracker_data():
     df.to_excel(excel_file, index=False, engine="openpyxl")
     format_excel(excel_file, excel_file)
     return df, str(excel_file)
+
+
+def persist_current_followup_output(file_path=None):
+    runtime_file_path = Path(file_path) if file_path else get_runtime_excel_path()
+    if not runtime_file_path.exists():
+        _, generated_path = export_tracker_data()
+        runtime_file_path = Path(generated_path)
+
+    return persist_followup_export(
+        runtime_file_path,
+        uploaded_report_path=last_report_output_path or None,
+        patient_name=PATIENT_NAME,
+        student_id=get_active_student_id(snapshot_session_state()),
+        followup_date=get_active_followup_date(snapshot_session_state()),
+    )
 
 
 def add_assistant_message(message, current_chat_history):
@@ -1075,7 +1098,7 @@ def maybe_finalize_computed_fields(current_chat_history):
 
 def build_runtime_error_message(exc):
     if "DASHSCOPE_API_KEY" in str(exc):
-        return "系统已启动，但尚未配置 DASHSCOPE_API_KEY，暂时无法调用大模型。请先在 Hugging Face Space Secrets 中添加该密钥。"
+        return "当前未提供API"
     return f"系统运行时出现错误: {exc}"
 
 
@@ -1181,7 +1204,8 @@ def advance_after_report_upload(current_chat_history, extracted_rows=None):
         f"解释: 已将当前问题更新为 {upload_result['field_value']}。"
     )
     if next_field is None:
-        completion_msg = "所有信息已收集完成，请点击“导出结果”按钮下载随访结果。"
+        saved_output_path = persist_current_followup_output(file_path)
+        completion_msg = "所有信息已收集完成，您已可以关闭页面。"
         add_assistant_message(completion_msg, updated_chat_history)
         return updated_chat_history, next_field, build_progress_html(), parse_text, file_path, df
 
@@ -1433,7 +1457,8 @@ def process_user_input(user_message, current_chat_history):
         field = tracker.get_next_field()
 
     if field is None:
-        completion_msg = "所有信息已收集完成，请点击“导出结果”按钮下载随访结果。"
+        saved_output_path = persist_current_followup_output(file_path)
+        completion_msg = "所有信息已收集完成，您已可以关闭页面。"
         add_assistant_message(completion_msg, current_chat_history)
         return "", current_chat_history, field, build_progress_html(), parse_output, file_path, df
 
@@ -1461,19 +1486,12 @@ def process_user_input(user_message, current_chat_history):
 def download_data(session_state=None, patient_name=None):
     with SESSION_LOCK:
         apply_session_state(session_state, patient_name, session_scoped=session_state is not None)
-        student_id = get_active_student_id(session_state) or get_active_student_id(snapshot_session_state())
-        followup_date = get_active_followup_date(session_state) or get_active_followup_date(snapshot_session_state())
         file_path = get_runtime_excel_path()
         if not os.path.exists(file_path):
             _, generated_path = export_tracker_data()
             file_path = Path(generated_path)
-        return persist_followup_export(
-            file_path,
-            uploaded_report_path=last_report_output_path or None,
-            patient_name=PATIENT_NAME,
-            student_id=student_id,
-            followup_date=followup_date,
-        )
+        format_excel(file_path, file_path)
+        return str(file_path)
 
 
 def on_edit(session_state=None, patient_name=None, edited_df=None):
@@ -1487,7 +1505,7 @@ def on_edit(session_state=None, patient_name=None, edited_df=None):
         excel_file = get_runtime_excel_path()
         edited_df.copy().to_excel(excel_file, index=False, engine="openpyxl")
         format_excel(excel_file, excel_file)
-        return gr.update(value="Saved"), gr.update(value=download_data)
+        return gr.update(value="Saved"), gr.update(value=str(excel_file))
 
 
 def respond(*args):
@@ -1635,18 +1653,12 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
                     placeholder="请输入当前患者学工号",
                     elem_classes=["compact-box", "metric-box"],
                 )
-                followup_date_input = gr.Textbox(
-                    label="随访日期",
-                    value="",
-                    placeholder="可手动输入，如 2025.06.12；留空则按默认/当天日期",
-                    elem_classes=["compact-box", "metric-box"],
-                )
                 with gr.Group(elem_classes=["sidebar-primary"]):
                     progress_output = gr.HTML(build_progress_html(), visible=False)
                 with gr.Row(elem_classes=["button-row"]):
                     start_btn = gr.Button("开始随访", variant="primary", elem_classes=["primary-action"])
                     init_btn = gr.Button("重新开始", visible=False, elem_classes=["soft-action"])
-                    download_btn = gr.DownloadButton(label="导出结果", value=download_data, visible=False, elem_classes=["soft-action"])
+                    download_btn = gr.DownloadButton(label="导出结果", value=None, visible=False, elem_classes=["soft-action"])
                 with gr.Accordion("查看详细状态", open=False, elem_classes=["compact-accordion"]):
                     question_output = gr.Textbox(label="当前问题主题", interactive=False, elem_classes=["compact-box", "metric-box"])
                     status_output = gr.Textbox(label="系统状态", interactive=False, elem_classes=["compact-box", "metric-box"])
@@ -1711,7 +1723,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
 
     start_btn.click(
         fn=start_followup,
-        inputs=[session_state, patient_name_input, student_id_input, followup_date_input],
+        inputs=[session_state, patient_name_input, student_id_input],
         outputs=[
             session_state,
             status_output,
@@ -1733,7 +1745,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
     )
     init_btn.click(
         fn=start_followup,
-        inputs=[session_state, patient_name_input, student_id_input, followup_date_input],
+        inputs=[session_state, patient_name_input, student_id_input],
         outputs=[
             session_state,
             status_output,
@@ -1755,7 +1767,7 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
     )
     demo.load(
         fn=build_login_required_view,
-        inputs=[session_state, patient_name_input, student_id_input, followup_date_input],
+        inputs=[session_state, patient_name_input, student_id_input],
         outputs=[
             session_state,
             status_output,
@@ -1784,16 +1796,6 @@ with gr.Blocks(title="AI医疗随访系统") as demo:
         fn=normalize_student_id_input,
         inputs=student_id_input,
         outputs=student_id_input,
-    )
-    followup_date_input.input(
-        fn=normalize_followup_date_input,
-        inputs=followup_date_input,
-        outputs=followup_date_input,
-    )
-    download_btn.click(
-        fn=download_data,
-        inputs=[session_state, patient_name_input],
-        outputs=download_btn,
     )
     dataframe_output.edit(
         fn=on_edit,

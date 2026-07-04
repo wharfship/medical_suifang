@@ -66,6 +66,21 @@ class FieldRuleTests(unittest.TestCase):
         self.assertEqual(adjusted["field_value"], "是")
         self.assertEqual(adjusted["status"], "done")
 
+    def test_other_history_gate_field_normalizes_single_mei_to_no(self):
+        result = {
+            "status": "done",
+            "completion": "complete",
+            "field_value": "没",
+            "confidence": 1.0,
+            "reasoning": "原始结果",
+            "evidence": "patient: 没",
+        }
+
+        adjusted = field_rules.apply_field_completion_rules("其余病史及用药情况", result)
+
+        self.assertEqual(adjusted["field_value"], "否")
+        self.assertEqual(adjusted["status"], "done")
+
     def test_other_history_gate_field_normalizes_direct_diagnosis_to_yes(self):
         result = {
             "status": "ask_again",
@@ -91,7 +106,7 @@ class FieldRuleTests(unittest.TestCase):
             "evidence": "patient: 头晕",
         }
 
-        adjusted = field_rules.apply_field_completion_rules("（若有其余病史）具体疾病名称", result)
+        adjusted = field_rules.apply_field_completion_rules("（若有其余病史）疾病名称", result)
 
         self.assertEqual(adjusted["status"], "ask_again")
         self.assertEqual(adjusted["completion"], "partial")
@@ -106,7 +121,7 @@ class FieldRuleTests(unittest.TestCase):
             "evidence": "patient: 腰椎间盘突出",
         }
 
-        adjusted = field_rules.apply_field_completion_rules("（若有其余病史）具体疾病名称", result)
+        adjusted = field_rules.apply_field_completion_rules("（若有其余病史）疾病名称", result)
 
         self.assertEqual(adjusted["status"], "done")
         self.assertEqual(adjusted["completion"], "complete")

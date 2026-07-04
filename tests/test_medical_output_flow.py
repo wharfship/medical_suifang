@@ -16,6 +16,9 @@ FOLLOWUP_DATE = "2025.06.12"
 
 
 class MedicalOutputPersistenceTests(unittest.TestCase):
+    def test_build_followup_result_dirname_uses_readable_suffix(self):
+        self.assertEqual(build_followup_result_dirname(FOLLOWUP_DATE), "2025.06.12随访结果")
+
     def test_persist_followup_export_saves_excel_and_uploaded_report_in_patient_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_excel_path = os.path.join(temp_dir, "medical_data.xlsx")

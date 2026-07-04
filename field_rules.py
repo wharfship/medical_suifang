@@ -40,7 +40,7 @@ TEXT_COMPLETE_FIELDS = {
     "尿常规：尿蛋白、尿潜血",
     "肾脏彩超",
 }
-DIAGNOSIS_TEXT_FIELDS = {"（若有其余病史）具体疾病名称"}
+DIAGNOSIS_TEXT_FIELDS = {"（若有其余病史）疾病名称"}
 OTHER_HISTORY_GATE_FIELD = "其余病史及用药情况"
 
 STRICT_COMPLEX_FIELDS = {
@@ -107,7 +107,7 @@ FIELD_RULES = {
         "accepted_examples": ["有", "无", "甲减"],
         "followup_focus": "优先把入口判断收束成是/否/未知；若患者直接说出疾病名，可判为“是”，再单独追问具体疾病名称。",
     },
-    "（若有其余病史）具体疾病名称": {
+    "（若有其余病史）疾病名称": {
         "minimum_requirement": "需要记录明确诊断名称，只接受疾病名，不接受头晕、咳嗽、难受这类症状描述。",
         "accepted_examples": ["甲减", "慢阻肺", "腰椎间盘突出"],
         "followup_focus": "如果患者只说症状，需要继续追问医院明确诊断的疾病名称。",
@@ -205,6 +205,14 @@ def _normalize_yes_no(value):
     if text in {"是", "否", "未知"}:
         return text
     return text
+
+
+def _normalize_yes_no_loose(value):
+    normalized = _normalize_yes_no(value)
+    text = _clean_text(value)
+    if normalized == text and re.search(r"(\u6ca1)", text):
+        return "\u5426"
+    return normalized
 
 
 def _normalize_height(value):
@@ -585,7 +593,7 @@ def apply_field_completion_rules(field, result):
         return adjusted
 
     if field in YES_NO_FIELDS:
-        normalized = _normalize_yes_no(value)
+        normalized = _normalize_yes_no_loose(value)
         if normalized in {"是", "否", "未知"}:
             adjusted["field_value"] = normalized
             adjusted["status"] = "done"
@@ -649,7 +657,7 @@ def apply_field_completion_rules(field, result):
             return _finalize_strict_complex_result(adjusted, slots, note)
 
     if field == OTHER_HISTORY_GATE_FIELD:
-        normalized = _normalize_yes_no(value)
+        normalized = _normalize_yes_no_loose(value)
         if normalized in {"是", "否", "未知"}:
             adjusted["field_value"] = normalized
             adjusted["status"] = "done"
