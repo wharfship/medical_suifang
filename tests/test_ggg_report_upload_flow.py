@@ -187,7 +187,11 @@ class ReportUploadAdvanceTests(unittest.TestCase):
         with patch(
             "ggg.save_report_file_only",
             return_value=("上传完成", "C:/outputs/李同学/ultrasound.jpg"),
-        ) as save_only_mock:
+        ) as save_only_mock, patch(
+            "ggg.get_session_patient_output_dir", return_value=None
+        ), patch(
+            "ggg.get_active_student_id", return_value=""
+        ):
             status, saved_path, download_path, upload_reset, rows = ggg.save_uploaded_report(
                 "C:/temp/ultrasound.jpg",
                 current_field="肾脏彩超",

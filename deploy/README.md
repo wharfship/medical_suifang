@@ -5,6 +5,7 @@ This directory stores the files needed to run the Gradio app with `systemd` and 
 ## Files
 
 - `medical-suifang.service`: systemd service template for the Gradio app
+- `medical-algorithm-api.service`: systemd service template for the FastAPI service
 - `medical_suifang.env.example`: environment variable example file
 - `nginx-medical-suifang.conf`: nginx reverse proxy template for domain access
 
@@ -60,6 +61,49 @@ If the service is healthy, the app should continue to be reachable at:
 http://<your-server-ip>:7860
 ```
 
+## Run The API Service
+
+The Gradio service and the API service run in parallel. The API service listens
+only on `127.0.0.1:8000`; nginx exposes it under `/api/`.
+
+When a follow-up completes, the API saves its final Excel workbook under the
+project `outputs/` directory. Ensure that the `suifang` user can write to this
+directory.
+
+Install the updated dependencies, install the unit file, then start it:
+
+```bash
+cd /home/suifang/medical_suifang
+/home/suifang/.venv/bin/pip install -r requirements.txt
+sudo cp deploy/medical-algorithm-api.service /etc/systemd/system/medical-algorithm-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable medical-algorithm-api
+sudo systemctl start medical-algorithm-api
+sudo systemctl status medical-algorithm-api
+```
+
+After copying the updated nginx configuration, validate and reload nginx:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Verify the API locally on the server:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/health
+```
+
+With nginx configured, the API documentation is available at:
+
+```text
+http://<your-server-ip>/api/docs
+```
+
+Use an HTTPS domain and add authentication before allowing a mini program or
+other external client to use this service.
+
 ## Update Workflow
 
 When you update the code later:
@@ -67,6 +111,7 @@ When you update the code later:
 ```bash
 git pull
 sudo systemctl restart medical-suifang
+sudo systemctl restart medical-algorithm-api
 ```
 
 ## IP Access With Nginx
